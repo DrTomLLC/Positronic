@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod pty_manager;
+pub mod state_machine;
 
 /// A single "Block" of terminal output.
 /// This is the atomic unit of the Positronic interface.
