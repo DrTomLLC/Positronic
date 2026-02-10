@@ -1,0 +1,25 @@
+[package]
+name = "positronic-script"
+version = "0.1.0"
+edition = "2024"
+authors = ["Doctor Tom"]
+description = "Rust-native scripting runner for Positronic."
+license = "MIT"
+publish = false
+
+[dependencies]
+# --- Script Execution ---
+# The engine that compiles and runs single-file Rust scripts.
+# The modern, maintained replacement for cargo-script
+rust-script = "0.36" 
+
+# --- Compilation Caching ---
+# Hashes file contents to avoid recompiling unchanged scripts.
+sha2 = "0.10"
+hex = "0.4"
+directories = "5.0" # To store the cache in ~/.cache/positronic
+
+# --- System ---
+tokio = { version = "1.36", features = ["process", "fs"] }
+anyhow = "1.0"
+tempfile = "3.10" # For creating temporary cargo projects
