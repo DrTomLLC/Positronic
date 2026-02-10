@@ -1,0 +1,32 @@
+[package]
+name = "positronic-bridge"
+version = "0.1.0"
+edition = "2024"
+authors = ["Doctor Tom"]
+description = "The GPU-accelerated frontend for Positronic."
+license = "MIT"
+default-run = "positronic-bridge"
+
+[dependencies]
+# --- Internal Modules ---
+# Connects the GUI to the Engine and the AI
+positronic-core = { path = "../positronic-core" }
+positronic-neural = { path = "../positronic-neural" }
+positronic-script = { path = "../positronic-script" }
+
+# --- GUI Framework ---
+# "iced" is currently the safest bet for Windows 11 stability in 2026.
+# If you feel brave and want Zed-like speed later, swap for "gpui".
+iced = { version = "0.12", features = ["tokio", "advanced", "fonts"] }
+
+# --- Async Runtime ---
+# The Bridge owns the main runtime loop.
+tokio = { version = "1.36", features = ["full"] }
+
+# --- Utilities ---
+tracing = "0.1"
+tracing-subscriber = "0.3" # To see logs in stdout
+directories = "5.0"        # For finding config paths (~/.config/positronic)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"         # For config files
+font-kit = "0.11"          # To load system fonts (JetBrains Mono, etc.)
