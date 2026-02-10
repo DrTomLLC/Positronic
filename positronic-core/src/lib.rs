@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod pty_manager;
+
 /// A single "Block" of terminal output.
 /// This is the atomic unit of the Positronic interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
