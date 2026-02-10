@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "positronic-bridge",  # The GUI Application
+    "positronic-core",    # The Internal Library
+    "positronic-neural",  # The AI/NPU Client
+    "positronic-script",  # The Scripting Engine
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Doc Tom"]
+license = "MIT"
+repository = "https://github.com/yourusername/positronic"
+
+[workspace.dependencies]
+# Centralize versioning here so all crates use the same deps
+tokio = { version = "1.36", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"
+tracing = "0.1"
