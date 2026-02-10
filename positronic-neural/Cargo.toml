@@ -1,0 +1,26 @@
+[package]
+name = "positronic-neural"
+version = "0.1.0"
+edition = "2024"
+authors = ["Doctor Tom"]
+description = "Local NPU client interface for Positronic."
+license = "MIT"
+publish = false
+
+[dependencies]
+# --- AI Client ---
+# The standard OpenAI-compatible client to talk to Lemonade.
+async-openai = "0.23"
+
+# --- HTTP Client ---
+reqwest = { version = "0.12", features = ["json"] }
+
+# --- Data ---
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+
+# --- Security ---
+# Use regex to scrub sensitive data (API keys, passwords) before sending to NPU.
+regex = "1.10"
