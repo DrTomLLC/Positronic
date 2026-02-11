@@ -49,3 +49,7 @@ notify = "6.1"
 # --- Cross-Platform Bits ---
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["consoleapi", "handleapi"] }
+
+[dev-dependencies]
+tokio = { version = "1.36", features = ["full"] }
+serde_json = "1.0"

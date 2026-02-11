@@ -24,3 +24,6 @@ directories = "5.0" # To store the cache in ~/.cache/positronic
 tokio = { version = "1.36", features = ["process", "fs"] }
 anyhow = "1.0"
 tempfile = "3.10" # For creating temporary cargo projects
+
+[dev-dependencies]
+tokio = { version = "1.36", features = ["full"] }

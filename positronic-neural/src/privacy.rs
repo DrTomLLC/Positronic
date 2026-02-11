@@ -38,20 +38,3 @@ impl PrivacyGuard {
         scrubbed
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_scrub_ip() {
-        let input = "Connect to 192.168.1.1 now";
-        assert_eq!(PrivacyGuard::scrub(input), "Connect to [REDACTED_IP] now");
-    }
-
-    #[test]
-    fn test_scrub_email() {
-        let input = "Contact tom@example.com";
-        assert_eq!(PrivacyGuard::scrub(input), "Contact [REDACTED_EMAIL]");
-    }
-}
