@@ -1,0 +1,12 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Dev\Projects\Rust\Positronic\positronic-bridge\Cargo.toml
+workspace: C:\Dev\Projects\Rust\Positronic\Cargo.toml
+    Updating crates.io index
+error: failed to select a version for `iced`.
+    ... required by package `positronic-bridge v0.1.0 (C:\Dev\Projects\Rust\Positronic\positronic-bridge)`
+versions that meet the requirements `^0.12` are: 0.12.1, 0.12.0
+
+package `positronic-bridge` depends on `iced` with feature `high_quality` but `iced` does not have that feature.
+
+
+failed to select a version for `iced` which could resolve this conflict

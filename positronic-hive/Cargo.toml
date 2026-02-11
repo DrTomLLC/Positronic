@@ -1,0 +1,17 @@
+[package]
+name = "positronic-hive"
+version = "0.1.0"
+edition = "2024"
+authors = ["Doctor Tom"]
+description = "Peer-to-Peer Collaboration layer for Positronic."
+license = "MIT"
+publish = false
+
+[dependencies]
+# --- Network Stack ---
+# (Placeholders for now)
+uuid = { version = "1.7", features = ["v4", "serde"] }
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"
+tracing = "0.1"
+tokio = { version = "1.36", features = ["full"] }

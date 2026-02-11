@@ -1,0 +1,103 @@
+warning: unused import: `serialport::SerialPort`
+  --> positronic-io\src\lib.rs:10:5
+   |
+10 | use serialport::SerialPort; // Requires 'serialport' crate
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variants `Disconnect` and `Stop` are never constructed
+  --> positronic-io\src\lib.rs:42:5
+   |
+40 | enum IOCommand {
+   |      --------- variants in this enum
+41 |     Connect(SerialConfig),
+42 |     Disconnect(String),
+   |     ^^^^^^^^^^
+43 |     Scan,
+44 |     Stop,
+   |     ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `active_ports` is never read
+  --> positronic-io\src\lib.rs:50:5
+   |
+48 | pub struct HardwareMonitor {
+   |            --------------- field in this struct
+49 |     /// Active ports are tracked by name for UI status
+50 |     active_ports: Arc<Mutex<Vec<String>>>,
+   |     ^^^^^^^^^^^^
+
+warning: `positronic-io` (lib) generated 3 warnings
+warning: field `watcher` is never read
+ --> positronic-core\src\watcher.rs:7:5
+  |
+6 | pub struct FileSystemWatcher {
+  |            ----------------- field in this struct
+7 |     watcher: RecommendedWatcher,
+  |     ^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `positronic-core` (lib) generated 1 warning
+    Checking positronic-bridge v0.1.0 (C:\Dev\Projects\Rust\Positronic\positronic-bridge)
+error[E0407]: method `style` is not a member of trait `container::StyleSheet`
+  --> positronic-bridge\src\holodeck\mod.rs:58:5
+   |
+58 | /     fn style(&self, _style: &Self::Style) -> container::Appearance {
+59 | |         container::Appearance {
+60 | |             background: Some(Background::Color(Color::from_rgba(0.1, 0.1, 0.1, 0.5))),
+61 | |             border_radius: 4.0.into(),
+...  |
+64 | |     }
+   | |_____^ not a member of trait `container::StyleSheet`
+
+error[E0046]: not all trait items implemented, missing: `appearance`
+  --> positronic-bridge\src\holodeck\mod.rs:55:1
+   |
+55 | impl container::StyleSheet for BlockStyle {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `appearance` in implementation
+   |
+   = help: implement the missing item: `fn appearance(&self, _: &<Self as iced::widget::container::StyleSheet>::Style) -> iced::widget::container::Appearance { todo!() }`
+
+error[E0560]: struct `iced::widget::container::Appearance` has no field named `border_radius`
+  --> positronic-bridge\src\holodeck\mod.rs:61:13
+   |
+61 |             border_radius: 4.0.into(),
+   |             ^^^^^^^^^^^^^ `iced::widget::container::Appearance` does not have this field
+   |
+   = note: available fields are: `text_color`, `border`, `shadow`
+
+error[E0309]: the parameter type `Message` may not live long enough
+  --> positronic-bridge\src\holodeck\mod.rs:43:9
+   |
+12 |     pub fn view<'a, Message>(&self) -> Element<'a, Message> {
+   |                 -- the parameter type `Message` must be valid for the lifetime `'a` as defined here...
+...
+43 |         column![content].into()
+   |         ^^^^^^^^^^^^^^^^^^^^^^^ ...so that the type `Message` will meet its required lifetime bounds
+   |
+help: consider adding an explicit lifetime bound
+   |
+12 |     pub fn view<'a, Message: 'a>(&self) -> Element<'a, Message> {
+   |                            ++++
+
+error[E0309]: the parameter type `Message` may not live long enough
+  --> positronic-bridge\src\holodeck\mod.rs:43:9
+   |
+12 |     pub fn view<'a, Message>(&self) -> Element<'a, Message> {
+   |                 -- the parameter type `Message` must be valid for the lifetime `'a` as defined here...
+...
+43 |         column![content].into()
+   |         ^^^^^^^^^^^^^^^^ ...so that the type `Message` will meet its required lifetime bounds
+   |
+   = note: this error originates in the macro `column` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider adding an explicit lifetime bound
+   |
+12 |     pub fn view<'a, Message: 'a>(&self) -> Element<'a, Message> {
+   |                            ++++
+
+Some errors have detailed explanations: E0046, E0309, E0407, E0560.
+For more information about an error, try `rustc --explain E0046`.
+error: could not compile `positronic-bridge` (bin "positronic-bridge") due to 5 previous errors

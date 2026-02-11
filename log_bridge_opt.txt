@@ -1,0 +1,8 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Dev\Projects\Rust\Positronic\positronic-bridge\Cargo.toml
+workspace: C:\Dev\Projects\Rust\Positronic\Cargo.toml
+    Updating crates.io index
+error: failed to select a version for the requirement `iced_aw = "^0.8"`
+  version 0.8.0 is yanked
+location searched: crates.io index
+required by package `positronic-bridge v0.1.0 (C:\Dev\Projects\Rust\Positronic\positronic-bridge)`

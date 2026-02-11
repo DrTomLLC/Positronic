@@ -1,0 +1,11 @@
+error: failed to load manifest for workspace member `C:\Dev\Projects\Rust\Positronic\positronic-bridge`
+referenced by workspace at `C:\Dev\Projects\Rust\Positronic\Cargo.toml`
+
+Caused by:
+  failed to load manifest for dependency `positronic-hive`
+
+Caused by:
+  failed to parse manifest at `C:\Dev\Projects\Rust\Positronic\positronic-hive\Cargo.toml`
+
+Caused by:
+  manifest is missing either a `[package]` or a `[workspace]`

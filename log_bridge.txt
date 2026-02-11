@@ -1,0 +1,76 @@
+    Checking positronic-hive v0.1.0 (C:\Dev\Projects\Rust\Positronic\positronic-hive)
+warning: unused import: `serialport::SerialPort`
+  --> positronic-io\src\lib.rs:10:5
+   |
+10 | use serialport::SerialPort; // Requires 'serialport' crate
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variants `Disconnect` and `Stop` are never constructed
+  --> positronic-io\src\lib.rs:42:5
+   |
+40 | enum IOCommand {
+   |      --------- variants in this enum
+41 |     Connect(SerialConfig),
+42 |     Disconnect(String),
+   |     ^^^^^^^^^^
+43 |     Scan,
+44 |     Stop,
+   |     ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `active_ports` is never read
+  --> positronic-io\src\lib.rs:50:5
+   |
+48 | pub struct HardwareMonitor {
+   |            --------------- field in this struct
+49 |     /// Active ports are tracked by name for UI status
+50 |     active_ports: Arc<Mutex<Vec<String>>>,
+   |     ^^^^^^^^^^^^
+
+warning: `positronic-io` (lib) generated 3 warnings
+warning: field `watcher` is never read
+ --> positronic-core\src\watcher.rs:7:5
+  |
+6 | pub struct FileSystemWatcher {
+  |            ----------------- field in this struct
+7 |     watcher: RecommendedWatcher,
+  |     ^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `positronic-core` (lib) generated 1 warning
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tokio`
+ --> positronic-hive\src\lib.rs:6:5
+  |
+6 | use tokio::sync::broadcast;
+  |     ^^^^^ use of unresolved module or unlinked crate `tokio`
+  |
+  = help: if you wanted to use a crate named `tokio`, use `cargo add tokio` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tokio`
+  --> positronic-hive\src\lib.rs:10:5
+   |
+10 | use tokio::sync::RwLock;
+   |     ^^^^^ use of unresolved module or unlinked crate `tokio`
+   |
+   = help: if you wanted to use a crate named `tokio`, use `cargo add tokio` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tokio`
+  --> positronic-hive\src\lib.rs:81:17
+   |
+81 |                 tokio::select! {
+   |                 ^^^^^ use of unresolved module or unlinked crate `tokio`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tokio`
+  --> positronic-hive\src\lib.rs:79:9
+   |
+79 |         tokio::spawn(async move {
+   |         ^^^^^ use of unresolved module or unlinked crate `tokio`
+   |
+   = help: if you wanted to use a crate named `tokio`, use `cargo add tokio` to add it to your `Cargo.toml`
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `positronic-hive` (lib) due to 4 previous errors
