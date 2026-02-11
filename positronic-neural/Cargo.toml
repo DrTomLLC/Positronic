@@ -8,6 +8,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
+async-trait = "0.1"
 # --- AI Client ---
 # The standard OpenAI-compatible client to talk to Lemonade.
 async-openai = "0.23"

@@ -2,31 +2,61 @@
 name = "positronic-bridge"
 version = "0.1.0"
 edition = "2024"
-authors = ["Doctor Tom"]
-description = "The GPU-accelerated frontend for Positronic."
-license = "MIT"
-default-run = "positronic-bridge"
+authors = ["Positronic Team"]
+description = "The NPU-accelerated, Rust-native terminal UI."
+
+[[bin]]
+name = "positronic-bridge"
+path = "src/main.rs"
 
 [dependencies]
-# --- Internal Modules ---
-# Connects the GUI to the Engine and the AI
+# -- UI & Rendering --
+# Advanced features enabled for the Holodeck
+iced = { version = "0.12", features = ["canvas", "image", "svg", "tokio", "debug", "advanced"] }
+wgpu = "0.19"   # Direct GPU access for custom shaders (Pillar II)
+
+# -- Async Runtime --
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# -- Internal Crates (The Architecture) --
 positronic-core = { path = "../positronic-core" }
 positronic-neural = { path = "../positronic-neural" }
+positronic-hive = { path = "../positronic-hive" }
+positronic-io = { path = "../positronic-io" }
 positronic-script = { path = "../positronic-script" }
+tokio-stream = "0.1"
 
-# --- GUI Framework ---
-# "iced" is currently the safest bet for Windows 11 stability in 2026.
-# If you feel brave and want Zed-like speed later, swap for "gpui".
-iced = { version = "0.12", features = ["tokio", "advanced", "fonts"] }
+# -- The Holodeck (Visualization) --
+plotters = "0.3"
+plotters-iced = "0.10"
+image = { version = "0.24", features = ["jpeg", "png", "bmp", "webp"] } # Full format support
+svg = "0.14"
+resvg = "0.36" # High-performance SVG rendering
 
-# --- Async Runtime ---
-# The Bridge owns the main runtime loop.
-tokio = { version = "1.36", features = ["full"] }
+# -- System Integration --
+copypasta = "0.10" # Cross-platform Clipboard (Essential for a Terminal)
+rfd = "0.14"       # Native File Dialogs (Save/Open)
+notify = "6.1"     # Filesystem watching for "Environment Watcher"
+directories = "5.0" # XDG/Config path compliance
+font-kit = "0.11"   # System font loading
 
-# --- Utilities ---
+# -- Input & Utils --
+crossterm = { version = "0.27", features = ["event-stream"] }
+which = "5.0"
+anyhow = "1.0"
 tracing = "0.1"
-tracing-subscriber = "0.3" # To see logs in stdout
-directories = "5.0"        # For finding config paths (~/.config/positronic)
+tracing-subscriber = "0.3"
+uuid = { version = "1.0", features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"         # For config files
-font-kit = "0.11"          # To load system fonts (JetBrains Mono, etc.)
+serde_json = "1.0"
+chrono = "0.4"
+
+# -- Performance Profile (The Iron Core) --
+[profile.release]
+opt-level = 3
+lto = "fat"      # Link Time Optimization for max speed
+codegen-units = 1 # Slower compile, faster code
+panic = "abort"   # Smaller binary, no unwinding
+strip = true      # Remove symbols

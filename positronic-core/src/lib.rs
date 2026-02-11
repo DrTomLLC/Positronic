@@ -1,12 +1,17 @@
+pub mod airlock;
+pub mod engine;
 pub mod pty_manager;
+pub mod runner;
+pub mod runtime;
 pub mod state_machine;
-pub mod engine; // Add this
+pub mod vault;
+pub mod watcher;
 
 // Re-export the main struct so users can just use `positronic_core::PositronicEngine`
 pub use engine::PositronicEngine;
 
 // Re-export the simpler types for the UI
-pub use state_machine::MyColor; 
+pub use state_machine::MyColor;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,16 +30,16 @@ pub struct TerminalBlock {
 /// The Bridge listens to this to know when to redraw.
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
-    Output(Vec<u8>),       // Raw bytes from shell
+    Output(Vec<u8>),              // Raw bytes from shell
     BlockFinished(TerminalBlock), // A command finished
-    Bell,                  // Ding!
+    Bell,                         // Ding!
 }
 
 /// The command stream to the PTY.
 /// The Bridge sends this to the Core.
 #[derive(Debug, Clone)]
 pub enum PtyCommand {
-    Input(String),         // User typed something
-    Resize(u16, u16),      // Window resized
-    Execute(String),       // Run this command (creates a block)
+    Input(String),    // User typed something
+    Resize(u16, u16), // Window resized
+    Execute(String),  // Run this command (creates a block)
 }

@@ -5,44 +5,47 @@ edition = "2024"
 authors = ["Doctor Tom"]
 description = "The high-stability state machine and PTY backend for the Positronic terminal environment."
 license = "MIT"
-# This library is internal and should not be published to crates.io
 publish = false
 
 [dependencies]
+# --- Internal Crates ---
+positronic-neural = { path = "../positronic-neural" }
+positronic-script = { path = "../positronic-script" }
+positronic-hive = { path = "../positronic-hive" }
+positronic-io = { path = "../positronic-io" }
+
 # --- The Terminal Backend ---
-# The battle-tested VTE parser and grid state from Alacritty.
-# We use this to avoid writing a VT100 parser from scratch.
 alacritty_terminal = "0.24"
 
 # --- PTY Management ---
-# Handles spawning shells (cmd.exe, powershell, wsl) and resizing.
-# Essential for Windows ConPTY support.
 portable-pty = "0.8"
 
 # --- Async Runtime ---
-# We need async for reading PTY output without blocking the main thread.
 tokio = { version = "1.36", features = ["sync", "io-util", "rt"] }
 
 # --- Data Handling ---
-# Used to serialize "Blocks" of text to send to the UI bridge.
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # --- Error Handling ---
-# Professional error context (e.g., "Failed to spawn shell").
 anyhow = "1.0"
 thiserror = "1.0"
 
 # --- Logging ---
-# For debugging the engine when things go wrong.
 tracing = "0.1"
 
+# --- Utilities ---
+bytes = "1.5"
+regex = "1.10"
+
+# --- Persistence ---
+rusqlite = { version = "0.30", features = ["bundled"] }
+uuid = { version = "1.7", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# --- Filesystem Watching ---
+notify = "6.1"
+
 # --- Cross-Platform Bits ---
-# Specific dependencies for Windows API interactions if needed directly.
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["consoleapi", "handleapi"] }
-
-# --- Utilities ---
-# For efficient byte parsing (if we need custom OSC 133 parsers on top of Alacritty).
-bytes = "1.5"
-regex = "1.10" # Useful for detecting shell prompts if OSC 133 is missing
