@@ -4,11 +4,8 @@ use positronic_core::PositronicEngine;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
-mod holodeck;
-mod input;
-
-use holodeck::TerminalBlock;
-use input::InputEditor;
+use positronic_bridge::holodeck::TerminalBlock;
+use positronic_bridge::input::InputEditor;
 
 pub fn main() -> iced::Result {
     let settings = Settings {
