@@ -1,7 +1,14 @@
-use serde::{Deserialize, Serialize};
-
 pub mod pty_manager;
 pub mod state_machine;
+pub mod engine; // Add this
+
+// Re-export the main struct so users can just use `positronic_core::PositronicEngine`
+pub use engine::PositronicEngine;
+
+// Re-export the simpler types for the UI
+pub use state_machine::MyColor; 
+
+use serde::{Deserialize, Serialize};
 
 /// A single "Block" of terminal output.
 /// This is the atomic unit of the Positronic interface.
