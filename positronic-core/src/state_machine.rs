@@ -16,6 +16,17 @@ pub struct StateMachine {
 }
 
 impl StateMachine {
+    pub fn resize(&self, cols: u16, rows: u16) {
+        let mut term = self.term.lock().unwrap();
+        let size = WindowSize {
+            num_lines: rows,
+            num_cols: cols,
+            cell_width: 1,
+            cell_height: 1,
+        };
+        term.resize(size);
+    }
+    
     pub fn new(cols: u16, rows: u16) -> Self {
         let size = WindowSize {
             num_lines: rows,
