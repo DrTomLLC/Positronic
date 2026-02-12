@@ -15,28 +15,32 @@ impl Airlock {
 
     /// Run a command in a "sandboxed" environment.
     /// Uses tokio::process to run an isolated command and capture output.
+    ///
+    /// Commands are routed through the system shell so that builtins
+    /// (echo, cd, etc.), pipes, and redirects work correctly.
     pub async fn run_sandboxed(&self, command: &str) -> Result<String> {
         if !self.enabled {
             return Err(anyhow!("Airlock is disabled."));
         }
 
-        tracing::info!("Executing in AIRLOCK: {}", command);
-
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        if parts.is_empty() {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
             return Err(anyhow!("Empty command"));
         }
 
-        let program = parts[0];
-        let args = &parts[1..];
+        tracing::info!("Executing in AIRLOCK: {}", trimmed);
 
-        // On Windows, you might need "cmd /c" or "powershell -c" if invoking shell builtins.
-        // But for "program execution", calling the binary directly is safer/cleaner.
-        // If the user wants shell features, they should invoke "cmd /c ..." explicitly or we wrap it.
-        // Let's assume raw binary execution for "Sandbox" purity.
+        // Route through the system shell so builtins (echo, cd, etc.),
+        // pipes, and redirects work on every platform.
+        #[cfg(windows)]
+        let output = tokio::process::Command::new("cmd")
+            .args(["/C", trimmed])
+            .output()
+            .await?;
 
-        let output = tokio::process::Command::new(program)
-            .args(args)
+        #[cfg(not(windows))]
+        let output = tokio::process::Command::new("sh")
+            .args(["-c", trimmed])
             .output()
             .await?;
 
@@ -51,7 +55,7 @@ impl Airlock {
 
         Ok(format!(
             "🔒 [AIRLOCK SECURE EXECUTION]\nCommand: `{}`\nStatus: {} (Exit Code: {})\n\n[STDOUT]\n{}\n[STDERR]\n{}",
-            command,
+            trimmed,
             status_icon,
             output.status.code().unwrap_or(-1),
             stdout,

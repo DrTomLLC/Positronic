@@ -10,8 +10,12 @@ publish = false
 [dependencies]
 # --- Network Stack ---
 # (Placeholders for now)
-uuid = { version = "1.7", features = ["v4", "serde"] }
-serde = { version = "1.0", features = ["derive"] }
-anyhow = "1.0"
-tracing = "0.1"
-tokio = { version = "1.36", features = ["full"] }
+uuid = { version = "1.20.0", features = ["v4", "serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+anyhow = "1.0.101"
+tracing = "0.1.44"
+tokio = { version = "1.49.0", features = ["full"] }
+
+[dev-dependencies]
+serde_json = "1.0.149"
+tokio = { version = "1.49.0", features = ["full"] }
