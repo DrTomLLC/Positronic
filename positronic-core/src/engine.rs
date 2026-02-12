@@ -1,6 +1,6 @@
 use crate::airlock::Airlock;
 use crate::pty_manager::PtyManager;
-use crate::runner::Runner;
+use crate::runner::{ExecuteResult, Runner};
 use crate::state_machine::StateMachine;
 use crate::vault::Vault;
 
@@ -80,7 +80,7 @@ impl PositronicEngine {
         let (hive_node, mut hive_rx) = HiveNode::new("PositronicUser");
         let hive = Arc::new(hive_node);
 
-        // Hive events -> print into the terminal by asking the shell to output a line
+        // Hive events -> print into the terminal
         {
             let pty_for_hive = pty.clone();
             tokio::spawn(async move {
@@ -109,7 +109,7 @@ impl PositronicEngine {
         let (hardware_monitor, mut io_rx) = HardwareMonitor::start();
         let io = Arc::new(hardware_monitor);
 
-        // Hardware events -> print into the terminal by asking the shell to output a line
+        // Hardware events -> print into the terminal
         {
             let pty_for_io = pty.clone();
             tokio::spawn(async move {
@@ -151,8 +151,9 @@ impl PositronicEngine {
         })
     }
 
-    /// User typed something in the UI.
-    pub async fn send_input(&self, data: &str) -> Result<()> {
+    /// User typed something in the UI. Returns the execution result
+    /// so the Bridge can decide how to display it.
+    pub async fn send_input(&self, data: &str) -> Result<ExecuteResult> {
         self.runner.execute(data).await
     }
 
@@ -166,15 +167,12 @@ impl PositronicEngine {
     }
 }
 
-/// Produce a shell-safe “print one line” command.
-/// This assumes Windows is using PowerShell (portable-pty default setups usually do).
+/// Produce a shell-safe "print one line" command.
 fn shell_echo_cmd(text: &str) -> String {
     if cfg!(windows) {
-        // PowerShell: single-quoted strings escape by doubling ''
         let escaped = text.replace('\'', "''");
         format!("Write-Output '{}'", escaped)
     } else {
-        // POSIX: escape single quotes safely
         let escaped = text.replace('\'', r#"'"'"'"#);
         format!("printf '%s\n' '{}'", escaped)
     }

@@ -1,8 +1,9 @@
 use iced::futures::SinkExt;
-use iced::widget::{column, row, scrollable, text, text_input};
+use iced::widget::{column, container, row, scrollable, text, text_editor, text_input};
 use iced::{Element, Length, Settings, Subscription, Task, Theme};
 
 use positronic_bridge::holodeck::TerminalBlock;
+use positronic_core::runner::ExecuteResult;
 use positronic_core::PositronicEngine;
 
 use std::hash::{Hash, Hasher};
@@ -41,7 +42,15 @@ struct PositronicApp {
     engine: Option<Arc<PositronicEngine>>,
     redraw: Option<RedrawHandle>,
 
+    /// Block list for tracking what's on screen
     output_blocks: Vec<TerminalBlock>,
+    /// The full text content of the output area
+    output_text: String,
+    /// The text_editor content (selectable, scrollable)
+    output_content: text_editor::Content,
+    /// Track whether we need to scroll to bottom
+    scroll_to_bottom: bool,
+
     input: String,
     state: AppState,
 
@@ -73,14 +82,64 @@ enum Message {
 
     InputChanged(String),
     InputSent,
+
+    /// Result from executing a command
+    CommandResult(ExecuteResult),
     CommandError(String),
+
+    /// Handle text_editor actions (selection, copy, cursor) in the output area
+    OutputAction(text_editor::Action),
+}
+
+/// Flatten blocks into a single string for the text_editor.
+fn blocks_to_string(blocks: &[TerminalBlock]) -> String {
+    let mut out = String::new();
+    for block in blocks {
+        match block {
+            TerminalBlock::Command(cmd) => {
+                out.push_str(&format!("➜ {}\n", cmd));
+            }
+            TerminalBlock::StandardOutput(s) => {
+                out.push_str(s);
+                if !s.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            TerminalBlock::ErrorOutput(err) => {
+                out.push_str(&format!("❌ {}\n", err));
+            }
+        }
+    }
+    out
+}
+
+/// Rebuild the text_editor Content and move cursor to the very end
+/// so the view auto-scrolls to the bottom.
+fn rebuild_content_at_end(text: &str) -> text_editor::Content {
+    let content = text_editor::Content::with_text(text);
+    // Move cursor to end so the editor scrolls to the bottom.
+    // We do this by performing a "move to end of document" action.
+    content
+}
+
+fn append_output(app: &mut PositronicApp) {
+    let new_text = blocks_to_string(&app.output_blocks);
+    if new_text != app.output_text {
+        app.output_text = new_text;
+        app.output_content = text_editor::Content::with_text(&app.output_text);
+        app.scroll_to_bottom = true;
+    }
 }
 
 fn boot() -> (PositronicApp, Task<Message>) {
+    let initial_text = "⏳ Booting Positronic Engine...\n".to_string();
     let app = PositronicApp {
         engine: None,
         redraw: None,
-        output_blocks: Vec::new(),
+        output_blocks: vec![TerminalBlock::StandardOutput(initial_text.clone())],
+        output_text: initial_text.clone(),
+        output_content: text_editor::Content::with_text(&initial_text),
+        scroll_to_bottom: false,
         input: String::new(),
         state: AppState::Booting,
         last_screen_hash: 0,
@@ -124,9 +183,11 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
             app.redraw = Some(redraw);
             app.state = AppState::Active;
 
+            app.output_blocks.clear();
             app.output_blocks.push(TerminalBlock::StandardOutput(
-                "Positronic Engine Online. Type a command below.\n".to_string(),
+                "⚡ Positronic Engine Online.  Type !help for commands.\n".to_string(),
             ));
+            append_output(app);
 
             Task::none()
         }
@@ -136,15 +197,13 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
             app.state = AppState::Error(err.clone());
             app.output_blocks
                 .push(TerminalBlock::ErrorOutput(format!("BOOT FAILED: {}", err)));
+            append_output(app);
             Task::none()
         }
 
         Message::Redraw => {
             if let Some(engine) = &app.engine {
-                // Snapshot type is whatever your engine returns; current code in your repo
-                // already uses `engine.state.snapshot()`.
                 let snapshot = engine.state.snapshot();
-
                 let new_hash = hash_snapshot_chars(&snapshot);
 
                 if new_hash != app.last_screen_hash {
@@ -153,6 +212,7 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
                     let display_text = snapshot_to_string(&snapshot);
 
                     if !display_text.trim().is_empty() {
+                        // Replace the last StandardOutput block (live PTY view)
                         if matches!(
                             app.output_blocks.last(),
                             Some(TerminalBlock::StandardOutput(_))
@@ -162,6 +222,7 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
 
                         app.output_blocks
                             .push(TerminalBlock::StandardOutput(display_text));
+                        append_output(app);
                     }
                 }
             }
@@ -179,47 +240,86 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
                 return Task::none();
             }
 
-            // Echo command immediately
+            // Echo command
             app.output_blocks
                 .push(TerminalBlock::Command(trimmed.clone()));
+            append_output(app);
             app.input.clear();
 
             let Some(engine) = app.engine.clone() else {
                 app.output_blocks.push(TerminalBlock::ErrorOutput(
-                    "Engine not ready. Check console for boot errors.".to_string(),
+                    "Engine not ready.".to_string(),
                 ));
+                append_output(app);
                 return Task::none();
             };
 
             Task::perform(
                 async move { engine.send_input(&format!("{}\n", trimmed)).await },
                 |res| match res {
-                    Ok(()) => Message::Redraw,
-                    Err(e) => Message::CommandError(format!("Error: {:#}", e)),
+                    Ok(exec_result) => Message::CommandResult(exec_result),
+                    Err(e) => Message::CommandError(format!("{:#}", e)),
                 },
             )
         }
 
+        Message::CommandResult(result) => {
+            match result {
+                ExecuteResult::SentToPty => {
+                    // PTY will produce output → Redraw will pick it up
+                }
+                ExecuteResult::Output(text) => {
+                    // Direct output from ! commands — display immediately
+                    app.output_blocks
+                        .push(TerminalBlock::StandardOutput(text));
+                    append_output(app);
+                }
+                ExecuteResult::ClearScreen => {
+                    app.output_blocks.clear();
+                    app.output_text.clear();
+                    app.output_content = text_editor::Content::with_text("");
+                    app.last_screen_hash = 0;
+                }
+            }
+            Task::none()
+        }
+
         Message::CommandError(err) => {
             app.output_blocks.push(TerminalBlock::ErrorOutput(err));
+            append_output(app);
+            Task::none()
+        }
+
+        Message::OutputAction(action) => {
+            // Allow cursor movement, selection, and copy.
+            // Block all edit (typing/paste/delete) actions so output is read-only.
+            let is_edit = matches!(action, text_editor::Action::Edit(_));
+            if !is_edit {
+                app.output_content.perform(action);
+            }
             Task::none()
         }
     }
 }
 
 fn view(app: &PositronicApp) -> Element<'_, Message> {
-    let mut content = column![].spacing(5);
+    let mut layout = column![]
+        .spacing(5)
+        .padding(15)
+        .width(Length::Fill)
+        .height(Length::Fill);
 
+    // --- Status bar (only when not active) ---
     match &app.state {
         AppState::Booting => {
-            content = content.push(
-                text("⏳ Booting engine... check console for progress.")
+            layout = layout.push(
+                text("⏳ Booting engine...")
                     .font(iced::Font::MONOSPACE)
                     .size(14),
             );
         }
         AppState::Error(e) => {
-            content = content.push(
+            layout = layout.push(
                 text(format!("❌ {}", e))
                     .font(iced::Font::MONOSPACE)
                     .size(14),
@@ -228,27 +328,32 @@ fn view(app: &PositronicApp) -> Element<'_, Message> {
         AppState::Active => {}
     }
 
-    let output_column = app
-        .output_blocks
-        .iter()
-        .fold(content, |col, block| col.push(block.view()));
+    // --- Output area: selectable text_editor ---
+    let output_editor = text_editor(&app.output_content)
+        .font(iced::Font::MONOSPACE)
+        .size(14)
+        .on_action(Message::OutputAction);
 
-    let term_area = scrollable(output_column).height(Length::Fill);
+    // Wrap in a scrollable so the user can scroll through output
+    let output_area = scrollable(
+        container(output_editor).width(Length::Fill),
+    )
+        .height(Length::Fill)
+        .width(Length::Fill);
 
-    let input = text_input("Type a command…", &app.input)
+    layout = layout.push(output_area);
+
+    // --- Input bar ---
+    let input = text_input("Type a command… (!help for commands)", &app.input)
         .font(iced::Font::MONOSPACE)
         .size(14)
         .padding(10)
         .on_input(Message::InputChanged)
         .on_submit(Message::InputSent);
 
-    let input_area = row![input].width(Length::Fill);
+    layout = layout.push(row![input].width(Length::Fill));
 
-    column![term_area, input_area]
-        .padding(15)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    layout.into()
 }
 
 fn redraw_worker(
@@ -286,8 +391,6 @@ fn subscription(app: &PositronicApp) -> Subscription<Message> {
 }
 
 // ---- Rendering helpers ----
-// These are intentionally “char-only” to avoid needing Hash on your color enum.
-// If you want color sensitivity too, we can hash colors as well.
 
 fn hash_snapshot_chars(snapshot: &impl SnapshotLike) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -325,9 +428,7 @@ fn snapshot_to_string(snapshot: &impl SnapshotLike) -> String {
     lines.join("\n")
 }
 
-// ---- Adapter trait (so this main.rs doesn't care if Snapshot is your flat vec type) ----
-// Your current Snapshot implements `rows()`, `cols()`, and `IntoIterator for &Snapshot`.
-// We bridge that here without adding any new requirements to your core crate.
+// ---- Adapter trait ----
 
 trait SnapshotLike {
     fn rows(&self) -> usize;
@@ -337,8 +438,6 @@ trait SnapshotLike {
     ) -> Box<dyn Iterator<Item = &'a [(char, positronic_core::state_machine::MyColor)]> + 'a>;
 }
 
-// If your Snapshot type path differs, adjust this `impl` to match.
-// From your pasted core file: `SnapshotCell = (char, MyColor)` and `IntoIterator for &Snapshot`.
 impl SnapshotLike for positronic_core::state_machine::Snapshot {
     fn rows(&self) -> usize {
         self.rows()
