@@ -52,7 +52,7 @@ uuid = { version = "1.20.0", features = ["v4", "serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 chrono = "0.4.43"
-quote = "1.0.40"
+quote = "1.0.44"
 
 # -- Performance Profile (The Iron Core) --
 [profile.release]

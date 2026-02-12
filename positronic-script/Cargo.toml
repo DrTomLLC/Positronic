@@ -11,8 +11,8 @@ publish = false
 # --- Script Execution ---
 # The engine that compiles and runs single-file Rust scripts.
 # The modern, maintained replacement for cargo-script
-rust-script = "0.36" 
-wasmtime = "41.0.3"
+rust-script = "0.36"
+ wasmtime = "41.0.3"
 
 # --- Compilation Caching ---
 # Hashes file contents to avoid recompiling unchanged scripts.

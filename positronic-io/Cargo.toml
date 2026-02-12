@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 # --- Hardware Interface ---
-serialport = ">=4.2, <4.8"
+serialport = ">=4.2, <4.8.1"
 tokio = { version = "1.49.0", features = ["sync", "macros", "rt"] }
 anyhow = "1.0.101"
 tracing = "0.1.44"

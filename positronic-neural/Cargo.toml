@@ -11,7 +11,7 @@ publish = false
 async-trait = "0.1.89"
 # --- AI Client ---
 # The standard OpenAI-compatible client to talk to Lemonade.
-async-openai = { version = "0.32", features = ["chat-completion"] }
+async-openai = { version = "0.32.4", features = ["chat-completion"] }
 
 # --- HTTP Client ---
 reqwest = { version = "0.13.2", features = ["json"] }

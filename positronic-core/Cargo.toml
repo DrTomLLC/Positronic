@@ -39,12 +39,12 @@ bytes = "1.5"
 regex = "1.10"
 
 # --- Persistence ---
-rusqlite = { version = "0.30", features = ["bundled"] }
-uuid = { version = "1.7", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+uuid = { version = "1.20.0", features = ["v4", "serde"] }
+chrono = { version = "0.4.43", features = ["serde"] }
 
 # --- Filesystem Watching ---
-notify = "6.1"
+notify = "9.0.0-rc.1"
 
 # --- Cross-Platform Bits ---
 [target.'cfg(windows)'.dependencies]
