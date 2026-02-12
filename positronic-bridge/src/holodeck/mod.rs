@@ -27,14 +27,9 @@ impl TerminalBlock {
                     .into()
             }
             TerminalBlock::StandardOutput(out) => {
-                let line = text(out)
-                    .font(iced::Font::MONOSPACE)
-                    .size(14);
+                let line = text(out).font(iced::Font::MONOSPACE).size(14);
 
-                container(line)
-                    .padding(5)
-                    .width(Length::Fill)
-                    .into()
+                container(line).padding(5).width(Length::Fill).into()
             }
             TerminalBlock::ErrorOutput(err) => {
                 let line = text(err)
@@ -42,10 +37,7 @@ impl TerminalBlock {
                     .size(14)
                     .color(Color::from_rgb(1.0, 0.4, 0.4)); // red-ish error
 
-                container(line)
-                    .padding(5)
-                    .width(Length::Fill)
-                    .into()
+                container(line).padding(5).width(Length::Fill).into()
             }
         }
     }

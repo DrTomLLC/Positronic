@@ -1,4 +1,4 @@
-use iced::futures::{channel::mpsc, SinkExt, StreamExt};
+use iced::futures::{SinkExt, StreamExt, channel::mpsc};
 
 #[tokio::test]
 async fn sinkext_send_is_available_for_iced_mpsc_sender() {

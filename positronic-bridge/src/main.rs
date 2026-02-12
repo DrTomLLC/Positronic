@@ -1,13 +1,13 @@
+use iced::futures::SinkExt;
 use iced::widget::{column, row, scrollable, text, text_input};
 use iced::{Element, Length, Settings, Subscription, Task, Theme};
-use iced::futures::SinkExt;
 
 use positronic_bridge::holodeck::TerminalBlock;
 use positronic_core::PositronicEngine;
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 pub fn main() -> iced::Result {
     tracing_subscriber::fmt()
@@ -153,8 +153,10 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
                     let display_text = snapshot_to_string(&snapshot);
 
                     if !display_text.trim().is_empty() {
-                        if matches!(app.output_blocks.last(), Some(TerminalBlock::StandardOutput(_)))
-                        {
+                        if matches!(
+                            app.output_blocks.last(),
+                            Some(TerminalBlock::StandardOutput(_))
+                        ) {
                             app.output_blocks.pop();
                         }
 
@@ -330,7 +332,9 @@ fn snapshot_to_string(snapshot: &impl SnapshotLike) -> String {
 trait SnapshotLike {
     fn rows(&self) -> usize;
     fn cols(&self) -> usize;
-    fn rows_iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a [(char, positronic_core::state_machine::MyColor)]> + 'a>;
+    fn rows_iter<'a>(
+        &'a self,
+    ) -> Box<dyn Iterator<Item = &'a [(char, positronic_core::state_machine::MyColor)]> + 'a>;
 }
 
 // If your Snapshot type path differs, adjust this `impl` to match.
@@ -346,9 +350,7 @@ impl SnapshotLike for positronic_core::state_machine::Snapshot {
 
     fn rows_iter<'a>(
         &'a self,
-    ) -> Box<
-        dyn Iterator<Item = &'a [(char, positronic_core::state_machine::MyColor)]> + 'a,
-    > {
+    ) -> Box<dyn Iterator<Item = &'a [(char, positronic_core::state_machine::MyColor)]> + 'a> {
         Box::new(self.into_iter())
     }
 }

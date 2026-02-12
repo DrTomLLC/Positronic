@@ -37,15 +37,9 @@ impl Default for AccessibilityConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BioLinkEvent {
     /// A command finished executing
-    CommandComplete {
-        command: String,
-        exit_code: i32,
-    },
+    CommandComplete { command: String, exit_code: i32 },
     /// Long-running job finished
-    JobFinished {
-        description: String,
-        success: bool,
-    },
+    JobFinished { description: String, success: bool },
     /// Error occurred
     ErrorOccurred(String),
     /// Peer activity (from Hive)
@@ -162,7 +156,14 @@ impl BioLink {
     pub fn block_label(command: &str, output: &str, exit_code: Option<i32>) -> String {
         let status = match exit_code {
             Some(0) => "succeeded",
-            Some(code) => return format!("Command {} failed with exit code {}. Output: {}", command, code, truncate_for_reader(output, 200)),
+            Some(code) => {
+                return format!(
+                    "Command {} failed with exit code {}. Output: {}",
+                    command,
+                    code,
+                    truncate_for_reader(output, 200)
+                );
+            }
             None => "running",
         };
         format!(

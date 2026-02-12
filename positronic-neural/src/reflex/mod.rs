@@ -83,14 +83,11 @@ fn known_typos() -> &'static HashMap<&'static str, &'static str> {
 fn common_commands() -> &'static Vec<&'static str> {
     COMMON_COMMANDS.get_or_init(|| {
         vec![
-            "git", "cargo", "rustup", "npm", "node", "python", "pip",
-            "docker", "kubectl", "ls", "cd", "cat", "grep", "find",
-            "mkdir", "rmdir", "rm", "cp", "mv", "touch", "chmod",
-            "chown", "echo", "less", "more", "head", "tail", "sort",
-            "uniq", "wc", "sed", "awk", "curl", "wget", "ssh", "scp",
-            "tar", "zip", "unzip", "make", "cmake", "gcc", "clear",
-            "history", "man", "which", "whereis", "sudo", "apt",
-            "brew", "pacman", "dnf", "yum",
+            "git", "cargo", "rustup", "npm", "node", "python", "pip", "docker", "kubectl", "ls",
+            "cd", "cat", "grep", "find", "mkdir", "rmdir", "rm", "cp", "mv", "touch", "chmod",
+            "chown", "echo", "less", "more", "head", "tail", "sort", "uniq", "wc", "sed", "awk",
+            "curl", "wget", "ssh", "scp", "tar", "zip", "unzip", "make", "cmake", "gcc", "clear",
+            "history", "man", "which", "whereis", "sudo", "apt", "brew", "pacman", "dnf", "yum",
         ]
     })
 }
@@ -181,11 +178,7 @@ impl ReflexEngine {
         // Try matching just the first word against known single-word typos
         let first_word = lower.split_whitespace().next()?;
         if let Some(corrected) = typos.get(first_word) {
-            let rest: String = input
-                .trim()
-                .chars()
-                .skip(first_word.len())
-                .collect();
+            let rest: String = input.trim().chars().skip(first_word.len()).collect();
             return Some(Suggestion {
                 corrected: format!("{}{}", corrected, rest),
                 confidence: 0.95,

@@ -259,17 +259,17 @@ impl StateMachine {
     /// Feed raw PTY/serial bytes into the terminal emulator.
     /// Keeps parser state across calls (important for escape sequences split across chunks).
     pub fn process_bytes(&self, bytes: &[u8]) {
-    if bytes.is_empty() {
-        return;
+        if bytes.is_empty() {
+            return;
+        }
+
+        let mut inner = self.lock_inner();
+
+        // Split the mutable borrow safely.
+        let Inner { term, parser } = &mut *inner;
+
+        parser.advance(term, bytes);
     }
-
-    let mut inner = self.lock_inner();
-
-    // Split the mutable borrow safely.
-    let Inner { term, parser } = &mut *inner;
-
-    parser.advance(term, bytes);
-}
 
     /// Allocate a fresh snapshot.
     /// If you want to reuse memory, prefer `snapshot_into`.

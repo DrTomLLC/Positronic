@@ -148,10 +148,7 @@ fn test_parse_legacy_empty_passthrough() {
 #[test]
 fn test_parse_native_ver() {
     let result = CommandParser::parse("!ver");
-    assert_eq!(
-        result,
-        CommandType::Native("ver".to_string(), vec![])
-    );
+    assert_eq!(result, CommandType::Native("ver".to_string(), vec![]));
 }
 
 #[test]
@@ -175,10 +172,7 @@ fn test_parse_neural_ai() {
 #[test]
 fn test_parse_neural_ask() {
     let result = CommandParser::parse("!ask what is rust");
-    assert_eq!(
-        result,
-        CommandType::Neural("what is rust".to_string())
-    );
+    assert_eq!(result, CommandType::Neural("what is rust".to_string()));
 }
 
 #[test]
@@ -269,10 +263,7 @@ fn test_parse_io_connect_invalid_baud() {
 #[test]
 fn test_parse_whitespace_handling() {
     let result = CommandParser::parse("  !ver  ");
-    assert_eq!(
-        result,
-        CommandType::Native("ver".to_string(), vec![])
-    );
+    assert_eq!(result, CommandType::Native("ver".to_string(), vec![]));
 }
 
 #[test]

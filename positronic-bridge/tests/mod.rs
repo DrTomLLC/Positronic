@@ -1,9 +1,5 @@
-use positronic_bridge::biolink::{
-    AccessibilityConfig, BioLink, BioLinkEvent,
-};
-use positronic_bridge::hardware::{
-    DeviceStatus, HardwarePanel, SensorStats, WaveformBuffer,
-};
+use positronic_bridge::biolink::{AccessibilityConfig, BioLink, BioLinkEvent};
+use positronic_bridge::hardware::{DeviceStatus, HardwarePanel, SensorStats, WaveformBuffer};
 use positronic_bridge::input::InputEditor;
 
 // ============================================================================

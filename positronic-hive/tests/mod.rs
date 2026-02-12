@@ -15,8 +15,16 @@ fn test_hive_node_creation() {
 #[test]
 fn test_hive_node_capabilities() {
     let (node, _rx) = HiveNode::new("Test");
-    assert!(node.local_peer.capabilities.contains(&"terminal-sharing".to_string()));
-    assert!(node.local_peer.capabilities.contains(&"file-transfer".to_string()));
+    assert!(
+        node.local_peer
+            .capabilities
+            .contains(&"terminal-sharing".to_string())
+    );
+    assert!(
+        node.local_peer
+            .capabilities
+            .contains(&"file-transfer".to_string())
+    );
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use positronic_neural::privacy::PrivacyGuard;
-use positronic_neural::reflex::{levenshtein_distance, ReflexEngine, SuggestionSource};
+use positronic_neural::reflex::{ReflexEngine, SuggestionSource, levenshtein_distance};
 
 // ============================================================================
 // PrivacyGuard Tests
@@ -259,10 +259,8 @@ fn test_reflex_case_insensitive_known_typos() {
 
 #[test]
 fn test_neural_client_creation() {
-    let client = positronic_neural::cortex::NeuralClient::new(
-        "http://localhost:8000/v1",
-        "test-model",
-    );
+    let client =
+        positronic_neural::cortex::NeuralClient::new("http://localhost:8000/v1", "test-model");
     // Just verify it can be created without panicking
     let debug = format!("{:?}", client);
     assert!(debug.contains("test-model"));
@@ -274,10 +272,7 @@ fn test_neural_client_creation() {
 
 #[test]
 fn test_lemonade_client_creation() {
-    let client = positronic_neural::LemonadeClient::new(
-        "http://localhost:8000/v1",
-        "test-model",
-    );
+    let client = positronic_neural::LemonadeClient::new("http://localhost:8000/v1", "test-model");
     // Verify the client was created (no panic)
     let _ = format!("{:?}", &client as *const _);
 }

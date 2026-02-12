@@ -167,7 +167,9 @@ fn test_serial_config_debug() {
 
 #[test]
 fn test_serial_config_various_baud_rates() {
-    let baud_rates = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+    let baud_rates = [
+        300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600,
+    ];
     for baud in baud_rates {
         let config = SerialConfig {
             port_name: "test".to_string(),
@@ -202,7 +204,9 @@ async fn test_hardware_monitor_scan_ports() {
 async fn test_hardware_monitor_connect_nonexistent() {
     let (monitor, mut rx) = HardwareMonitor::start();
     // Connecting to a nonexistent port should send an error event
-    let _ = monitor.connect("/dev/nonexistent_positronic_port", 9600).await;
+    let _ = monitor
+        .connect("/dev/nonexistent_positronic_port", 9600)
+        .await;
 
     // Give the IO thread time to process
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
