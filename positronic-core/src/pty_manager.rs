@@ -86,7 +86,7 @@ impl PtyManager {
 
     #[cfg(not(windows))]
     {
-        self.write_raw(b"\n")?;
+        self.write_raw("\n")?;
     }
 
     Ok(())

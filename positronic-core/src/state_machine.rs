@@ -268,7 +268,12 @@ impl StateMachine {
         // Split the mutable borrow safely.
         let Inner { term, parser } = &mut *inner;
 
-        parser.advance(term, bytes);
+        /*for &byte in bytes {
+            parser.advance(term, byte);
+        }*/
+        for &byte in bytes.iter() {
+            parser.advance(term, byte);
+        }
     }
 
     /// Allocate a fresh snapshot.
