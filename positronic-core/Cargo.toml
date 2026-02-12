@@ -15,41 +15,37 @@ positronic-hive = { path = "../positronic-hive" }
 positronic-io = { path = "../positronic-io" }
 
 # --- The Terminal Backend ---
-alacritty_terminal = "0.25.1"
+alacritty_terminal = "0.24"
 
 # --- PTY Management ---
-portable-pty = "0.9.0"
+portable-pty = "0.8"
 
 # --- Async Runtime ---
-tokio = { version = "1.49.0", features = ["sync", "io-util", "rt"] }
+tokio = { version = "1.36", features = ["sync", "io-util", "rt"] }
 
 # --- Data Handling ---
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 # --- Error Handling ---
-anyhow = "1.0.101"
-thiserror = "2.0.18"
+anyhow = "1.0"
+thiserror = "1.0"
 
 # --- Logging ---
-tracing = "0.1.44"
+tracing = "0.1"
 
 # --- Utilities ---
-bytes = "1.11.1"
-regex = "1.12.3"
+bytes = "1.5"
+regex = "1.10"
 
 # --- Persistence ---
-rusqlite = { version = "0.38.0", features = ["bundled"] }
-uuid = { version = "1.20.0", features = ["v4", "serde"] }
-chrono = { version = "0.4.43", features = ["serde"] }
+rusqlite = { version = "0.30", features = ["bundled"] }
+uuid = { version = "1.7", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 # --- Filesystem Watching ---
-notify = "9.0.0-rc.1"
+notify = "6.1"
 
 # --- Cross-Platform Bits ---
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["consoleapi", "handleapi"] }
-
-[dev-dependencies]
-tokio = { version = "1.49.0", features = ["full"] }
-serde_json = "1.0.149"
