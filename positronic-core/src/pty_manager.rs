@@ -76,12 +76,12 @@ impl PtyManager {
     // Prevent double-newlines if callers already include CR/LF.
     let s = line.trim_end_matches(&['\r', '\n'][..]);
 
-    self.write_raw(s.as_bytes())?;
+    self.write_raw(s)?;
 
     #[cfg(windows)]
     {
         // ConPTY / PowerShell expects CRLF as "Enter" reliably.
-        self.write_raw(b"\r\n")?;
+        self.write_raw("\r\n".as_ref())?;
     }
 
     #[cfg(not(windows))]
