@@ -58,28 +58,28 @@ impl PositronicEngine {
         // 3) Subsystems
         let airlock = Arc::new(Airlock::new());
 
-        // ── Neural: Lemonade on localhost:8000 ──
+        // Neural: Lemonade on localhost:8000
         // CORRECT URL: http://localhost:8000/api/v1 (note /api/ prefix)
-        // Model "auto" queries /api/v1/models and uses first loaded model
+        // "auto" queries /api/v1/models and picks the first loaded model
         let neural = Arc::new(NeuralClient::new(
             "http://localhost:8000/api/v1",
             "auto",
         ));
 
-        let vault = Vault::open("positronic.db").context("Failed to open Vault database")?;
-        let wasm_host = Arc::new(WasmHost::new().context("Failed to initialize WASM host")?);
+        let vault = Vault::open("positronic.db").context("Failed to open Vault")?;
+        let wasm_host = Arc::new(WasmHost::new().context("Failed to init WASM host")?);
 
         let (hive_node, mut hive_rx) = HiveNode::new("PositronicUser");
         let hive = Arc::new(hive_node);
 
-        // Hive event listener
+        // Hive event listener (background)
         {
             let pty_for_hive = pty.clone();
             tokio::spawn(async move {
                 while let Ok(event) = hive_rx.recv().await {
                     let msg = match event {
                         HiveEvent::PeerDiscovered { peer_id, name } => {
-                            format!("📡 Peer Found: {} ({})", name, peer_id)
+                            format!("📡 Peer: {} ({})", name, peer_id)
                         }
                         HiveEvent::PeerLost { peer_id } => {
                             format!("📡 Peer Lost: {}", peer_id)
@@ -89,7 +89,7 @@ impl PositronicEngine {
                             format!("💬 [{}]: {}", from, text)
                         }
                         HiveEvent::LiveSessionInvite { from, session_id } => {
-                            format!("📞 Invite from {}: Join {}", from, session_id)
+                            format!("📞 Invite from {}: {}", from, session_id)
                         }
                         HiveEvent::Error(e) => format!("⚠️ Hive: {}", e),
                     };
@@ -102,7 +102,7 @@ impl PositronicEngine {
         let (hardware_monitor, mut io_rx) = HardwareMonitor::start();
         let io = Arc::new(hardware_monitor);
 
-        // Hardware event listener
+        // Hardware event listener (background)
         {
             let pty_for_io = pty.clone();
             tokio::spawn(async move {
@@ -139,10 +139,12 @@ impl PositronicEngine {
         })
     }
 
+    /// User typed something. Returns what the UI should do.
     pub async fn send_input(&self, data: &str) -> Result<ExecuteResult> {
         self.runner.execute(data).await
     }
 
+    /// Window resized.
     pub async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let mut pty = self.pty.lock().await;
         pty.resize(cols, rows)?;
