@@ -20,7 +20,7 @@ $status = git status --porcelain
 if ($status) {
     # Generate a timestamped commit message
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $commitMsg = "wip: Auto-save at $timestamp"
+    $commitMsg = "Bug Fixes and Working AI and Some Terminal Commands at $timestamp"
 
     Write-Host ">>> Committing with message: '$commitMsg'" -ForegroundColor Yellow
     git commit -m "$commitMsg"

@@ -13,8 +13,6 @@ use positronic_script::wasm_host::WasmHost;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
-/// The main entry point for the Positronic Core.
-/// The UI holds one instance of this.
 #[derive(Debug)]
 pub struct PositronicEngine {
     pub pty: Arc<Mutex<PtyManager>>,
@@ -25,12 +23,9 @@ pub struct PositronicEngine {
 }
 
 impl PositronicEngine {
-    /// Starts the engine: spawns PTY + pump, initializes subsystems, returns the instance.
     pub async fn start(cols: u16, rows: u16, redraw_tx: mpsc::Sender<()>) -> Result<Self> {
         // 1) PTY + State Machine
         let mut pty_manager = PtyManager::new(cols, rows).context("Failed to create PTY")?;
-
-        // Start reader ASAP so we don't miss the initial prompt output.
         let mut rx_ptr = pty_manager
             .start_reader()
             .context("Failed to start PTY reader")?;
@@ -38,27 +33,22 @@ impl PositronicEngine {
         let pty = Arc::new(Mutex::new(pty_manager));
         let state = Arc::new(StateMachine::new(cols, rows));
 
-        // 2) Pump task: PTY -> StateMachine
+        // 2) Pump: PTY output → StateMachine
         {
             let state_clone = state.clone();
             let notifier = redraw_tx.clone();
-
             tokio::spawn(async move {
                 while let Some(bytes) = rx_ptr.recv().await {
                     state_clone.process_bytes(&bytes);
-
-                    // Drain immediately available chunks (reduces redraw spam)
                     while let Ok(more) = rx_ptr.try_recv() {
                         state_clone.process_bytes(&more);
                     }
-
-                    // Coalesce redraws (do not await; do not block pump)
                     let _ = notifier.try_send(());
                 }
             });
         }
 
-        // Kick the shell once so you always get a prompt quickly.
+        // Kick the shell for initial prompt
         {
             let mut p = pty.lock().await;
             let _ = p.write_line("");
@@ -68,19 +58,21 @@ impl PositronicEngine {
         // 3) Subsystems
         let airlock = Arc::new(Airlock::new());
 
+        // ── Neural: Lemonade on localhost:8000 ──
+        // CORRECT URL: http://localhost:8000/api/v1 (note /api/ prefix)
+        // Model "auto" queries /api/v1/models and uses first loaded model
         let neural = Arc::new(NeuralClient::new(
-            "http://localhost:8000/v1",
-            "gpt-3.5-turbo",
+            "http://localhost:8000/api/v1",
+            "auto",
         ));
 
         let vault = Vault::open("positronic.db").context("Failed to open Vault database")?;
-
         let wasm_host = Arc::new(WasmHost::new().context("Failed to initialize WASM host")?);
 
         let (hive_node, mut hive_rx) = HiveNode::new("PositronicUser");
         let hive = Arc::new(hive_node);
 
-        // Hive events -> print into the terminal
+        // Hive event listener
         {
             let pty_for_hive = pty.clone();
             tokio::spawn(async move {
@@ -89,7 +81,9 @@ impl PositronicEngine {
                         HiveEvent::PeerDiscovered { peer_id, name } => {
                             format!("📡 Peer Found: {} ({})", name, peer_id)
                         }
-                        HiveEvent::PeerLost { peer_id } => format!("📡 Peer Lost: {}", peer_id),
+                        HiveEvent::PeerLost { peer_id } => {
+                            format!("📡 Peer Lost: {}", peer_id)
+                        }
                         HiveEvent::BlockReceived { from, content } => {
                             let text = String::from_utf8_lossy(&content);
                             format!("💬 [{}]: {}", from, text)
@@ -97,11 +91,10 @@ impl PositronicEngine {
                         HiveEvent::LiveSessionInvite { from, session_id } => {
                             format!("📞 Invite from {}: Join {}", from, session_id)
                         }
-                        HiveEvent::Error(e) => format!("⚠️ Hive Error: {}", e),
+                        HiveEvent::Error(e) => format!("⚠️ Hive: {}", e),
                     };
-
-                    let mut p_lock = pty_for_hive.lock().await;
-                    let _ = p_lock.write_line(&shell_echo_cmd(&msg));
+                    let mut p = pty_for_hive.lock().await;
+                    let _ = p.write_line(&shell_echo_cmd(&msg));
                 }
             });
         }
@@ -109,25 +102,20 @@ impl PositronicEngine {
         let (hardware_monitor, mut io_rx) = HardwareMonitor::start();
         let io = Arc::new(hardware_monitor);
 
-        // Hardware events -> print into the terminal
+        // Hardware event listener
         {
             let pty_for_io = pty.clone();
             tokio::spawn(async move {
                 while let Some(event) = io_rx.recv().await {
                     let msg = match event {
-                        HardwareEvent::DeviceConnected(name) => {
-                            format!("🔌 Device Connected: {}", name)
-                        }
-                        HardwareEvent::DeviceDisconnected(name) => {
-                            format!("🔌 Device Disconnected: {}", name)
-                        }
+                        HardwareEvent::DeviceConnected(n) => format!("🔌 Connected: {}", n),
+                        HardwareEvent::DeviceDisconnected(n) => format!("🔌 Disconnected: {}", n),
                         HardwareEvent::DataBatch(_) => continue,
                         HardwareEvent::SerialOutput(s) => s,
-                        HardwareEvent::Error(e) => format!("⚠️ IO Error: {}", e),
+                        HardwareEvent::Error(e) => format!("⚠️ IO: {}", e),
                     };
-
-                    let mut p_lock = pty_for_io.lock().await;
-                    let _ = p_lock.write_line(&shell_echo_cmd(&msg));
+                    let mut p = pty_for_io.lock().await;
+                    let _ = p.write_line(&shell_echo_cmd(&msg));
                 }
             });
         }
@@ -151,13 +139,10 @@ impl PositronicEngine {
         })
     }
 
-    /// User typed something in the UI. Returns the execution result
-    /// so the Bridge can decide how to display it.
     pub async fn send_input(&self, data: &str) -> Result<ExecuteResult> {
         self.runner.execute(data).await
     }
 
-    /// UI Window resized.
     pub async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let mut pty = self.pty.lock().await;
         pty.resize(cols, rows)?;
@@ -167,13 +152,12 @@ impl PositronicEngine {
     }
 }
 
-/// Produce a shell-safe "print one line" command.
 fn shell_echo_cmd(text: &str) -> String {
     if cfg!(windows) {
         let escaped = text.replace('\'', "''");
         format!("Write-Output '{}'", escaped)
     } else {
         let escaped = text.replace('\'', r#"'"'"'"#);
-        format!("printf '%s\n' '{}'", escaped)
+        format!("printf '%s\\n' '{}'", escaped)
     }
 }

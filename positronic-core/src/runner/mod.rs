@@ -7,31 +7,40 @@ use anyhow::Result;
 use positronic_hive::HiveNode;
 use positronic_io::HardwareMonitor;
 use positronic_neural::cortex::NeuralClient;
+use positronic_neural::reflex::ReflexEngine;
 use positronic_script::wasm_host::WasmHost;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Result of executing a command — tells the UI what to do.
+/// Result of executing a command — tells the UI what to display.
 #[derive(Debug, Clone)]
 pub enum ExecuteResult {
-    /// Command was sent to the PTY; the UI should wait for snapshot updates.
+    /// Command was sent to the PTY shell. UI waits for snapshot redraws.
     SentToPty,
-    /// Command produced output directly (! commands). Display this text.
-    Output(String),
-    /// Clear the screen.
+    /// Command produced direct output (bypass PTY). Display these lines.
+    DirectOutput(Vec<String>),
+    /// Clear the screen (PTY has already been sent cls).
     ClearScreen,
 }
+
+/// Confidence threshold for Reflex auto-correction.
+const AUTO_CORRECT_THRESHOLD: f64 = 0.8;
 
 #[derive(Debug)]
 pub struct Runner {
     pty: Arc<Mutex<PtyManager>>,
+    #[allow(dead_code)]
     airlock: Arc<Airlock>,
     neural: Arc<NeuralClient>,
     vault: Vault,
+    #[allow(dead_code)]
     wasm_host: Arc<WasmHost>,
+    #[allow(dead_code)]
     hive: Arc<HiveNode>,
+    #[allow(dead_code)]
     io: Arc<HardwareMonitor>,
+    reflex: ReflexEngine,
 }
 
 impl Runner {
@@ -52,15 +61,15 @@ impl Runner {
             wasm_host,
             hive,
             io,
+            reflex: ReflexEngine::new(),
         }
     }
 
-    /// Execute user input — parse it and route to the appropriate subsystem.
     pub async fn execute(&self, data: &str) -> Result<ExecuteResult> {
-        let mut normalized = data.replace("\r\n", "\n");
-        while normalized.ends_with('\n') {
-            normalized.pop();
-        }
+        let normalized = data
+            .replace("\r\n", "\n")
+            .trim_end_matches('\n')
+            .to_string();
 
         if normalized.trim().is_empty() {
             let mut pty = self.pty.lock().await;
@@ -68,123 +77,193 @@ impl Runner {
             return Ok(ExecuteResult::SentToPty);
         }
 
-        // ---- Intercept clear/cls before parsing ----
+        // Intercept clear/cls — send cls to the ACTUAL PTY so its
+        // screen buffer is wiped, then tell the UI to clear too.
         let lower = normalized.trim().to_lowercase();
         if lower == "clear" || lower == "cls" || lower == "!clear" {
+            let mut pty = self.pty.lock().await;
+            // Send the real cls/clear to the PTY shell so the
+            // underlying terminal buffer is emptied.
+            if cfg!(windows) {
+                pty.write_line("cls")?;
+            } else {
+                pty.write_line("clear")?;
+            }
             return Ok(ExecuteResult::ClearScreen);
         }
 
-        // ---- Parse and route ----
         let parsed = CommandParser::parse(&normalized);
 
         match parsed {
-            // Regular shell commands → PTY
-            CommandType::Legacy(cmd) => {
-                let _ = self.vault.log_command(&cmd, None, None, ".", None);
-                let mut pty = self.pty.lock().await;
-                pty.write_line(&cmd)?;
-                Ok(ExecuteResult::SentToPty)
-            }
+            // Shell commands → Reflex check → PTY
+            CommandType::Legacy(cmd) => self.execute_shell_command(&cmd).await,
 
-            // !ver, !help, !history, etc. → direct output
+            // Built-in ! commands
             CommandType::Native(cmd, args) => {
-                let output = self.handle_native(&cmd, &args).await;
-                Ok(ExecuteResult::Output(output))
+                let lines = self.handle_native(&cmd, &args).await;
+                Ok(ExecuteResult::DirectOutput(lines))
             }
 
-            // !ai <prompt> or !ask <prompt> → Neural
-            CommandType::Neural(prompt) => {
-                let mut lines = vec!["🧠 Asking Neural...".to_string()];
-                match self.neural.ask(&prompt).await {
-                    Ok(response) => {
-                        for line in response.lines() {
-                            lines.push(format!("  {}", line));
-                        }
-                    }
-                    Err(e) => {
-                        lines.push(format!("❌ Neural error: {}", e));
-                        lines.push(
-                            "   (Is Lemonade running on localhost:8000?)".to_string(),
-                        );
-                    }
-                }
-                Ok(ExecuteResult::Output(lines.join("\n")))
-            }
+            // !ai / !ask → Neural
+            CommandType::Neural(prompt) => self.handle_neural(&prompt).await,
 
-            // sandbox <cmd> → Airlock
-            CommandType::Sandboxed(cmd) => {
-                let mut lines = vec![format!("🔒 Sandboxing: {}", cmd)];
-                match self.airlock.run_sandboxed(&cmd).await {
-                    Ok(output) => {
-                        for line in output.lines() {
-                            lines.push(line.to_string());
-                        }
-                    }
-                    Err(e) => {
-                        lines.push(format!("❌ Airlock error: {}", e));
-                    }
-                }
-                Ok(ExecuteResult::Output(lines.join("\n")))
-            }
+            // STUB: sandbox
+            CommandType::Sandboxed(_cmd) => Ok(ExecuteResult::DirectOutput(vec![
+                "🔒 Airlock sandboxing is not yet implemented.".to_string(),
+            ])),
 
-            // !run <path> or !wasm <path> → Script
-            CommandType::Script(kind, path) => {
-                let output = self.handle_script(&kind, &path).await;
-                Ok(ExecuteResult::Output(output))
-            }
+            // STUB: !run / !wasm
+            CommandType::Script(kind, path) => Ok(ExecuteResult::DirectOutput(vec![
+                format!("🚀 !{} {} — not yet implemented.", kind, path),
+            ])),
 
-            // !hive scan, !hive status, !chat <msg>
+            // STUB: !hive
             CommandType::Hive(hive_cmd) => {
-                let output = self.handle_hive(hive_cmd).await;
-                Ok(ExecuteResult::Output(output))
+                let msg = match hive_cmd {
+                    HiveCommand::Scan => {
+                        "📡 Hive peer discovery — not yet implemented (loopback only)."
+                    }
+                    HiveCommand::Status => "📡 Hive is in loopback simulation mode.",
+                    HiveCommand::Chat(_) => {
+                        "💬 Hive mesh chat — not yet implemented (loopback only)."
+                    }
+                };
+                Ok(ExecuteResult::DirectOutput(vec![msg.to_string()]))
             }
 
-            // !io scan, !io connect <port> <baud>
+            // STUB: !io
             CommandType::IO(io_cmd) => {
-                let output = self.handle_io(io_cmd).await;
-                Ok(ExecuteResult::Output(output))
+                let msg = match io_cmd {
+                    IOCommand::Scan | IOCommand::List => {
+                        "🔌 Hardware IO scanning — not yet implemented."
+                    }
+                    IOCommand::Connect(_, _) => {
+                        "🔌 Serial port connection — not yet implemented."
+                    }
+                };
+                Ok(ExecuteResult::DirectOutput(vec![msg.to_string()]))
             }
         }
     }
 
     // ----------------------------------------------------------------
-    // Native (!-prefixed built-in) commands
+    // Shell command with Reflex typo correction
     // ----------------------------------------------------------------
 
-    async fn handle_native(&self, cmd: &str, args: &[String]) -> String {
-        match cmd {
-            "ver" | "version" => {
-                "⚡ Positronic v0.1.0 — Local-First Terminal".to_string()
-            }
+    async fn execute_shell_command(&self, cmd: &str) -> Result<ExecuteResult> {
+        if let Some(suggestion) = self.reflex.fix_command(cmd) {
+            if suggestion.confidence >= AUTO_CORRECT_THRESHOLD {
+                // High confidence → auto-correct
+                let lines = vec![format!(
+                    "  💡 Auto-corrected → {} ({:.0}%, {:?})",
+                    suggestion.corrected,
+                    suggestion.confidence * 100.0,
+                    suggestion.source
+                )];
 
-            "help" => [
-                "⚡ Positronic Commands:",
-                "",
-                "  !ver                          Version info",
-                "  !help                         This help message",
-                "  !history <query>              Search command history",
-                "  !clear                        Clear the screen",
-                "",
-                "  !ai <prompt>                  Ask the Neural engine",
-                "  !ask <prompt>                 Alias for !ai",
-                "",
-                "  !run <path.rs>                Run a Rust script",
-                "  !wasm <path.wasm>             Run a WASM plugin",
-                "",
-                "  !hive scan                    Scan for peers",
-                "  !hive status                  Hive network status",
-                "  !chat <message>               Send message to mesh",
-                "",
-                "  !io scan                      Scan serial ports",
-                "  !io list                      Alias for !io scan",
-                "  !io connect <port> <baud>     Connect to device",
-                "",
-                "  sandbox <cmd>                 Run command in Airlock",
-                "  clear / cls                   Clear the screen",
-                "",
-                "  (Anything else is sent to your system shell.)",
-            ]
-                .join("\n"),
+                let _ =
+                    self.vault
+                        .log_command(&suggestion.corrected, None, None, ".", None);
+                let mut pty = self.pty.lock().await;
+                pty.write_line(&suggestion.corrected)?;
+
+                return Ok(ExecuteResult::DirectOutput(lines));
+            } else {
+                // Lower confidence → hint only, execute original
+                let hint = format!(
+                    "  💡 Did you mean: {}? ({:.0}%)",
+                    suggestion.corrected,
+                    suggestion.confidence * 100.0
+                );
+
+                let _ = self.vault.log_command(cmd, None, None, ".", None);
+                let mut pty = self.pty.lock().await;
+                pty.write_line(cmd)?;
+
+                return Ok(ExecuteResult::DirectOutput(vec![hint]));
+            }
+        }
+
+        // No typo detected — execute as-is
+        let _ = self.vault.log_command(cmd, None, None, ".", None);
+        let mut pty = self.pty.lock().await;
+        pty.write_line(cmd)?;
+        Ok(ExecuteResult::SentToPty)
+    }
+
+    // ----------------------------------------------------------------
+    // Neural
+    // ----------------------------------------------------------------
+
+    async fn handle_neural(&self, prompt: &str) -> Result<ExecuteResult> {
+        if prompt.trim().is_empty() {
+            return Ok(ExecuteResult::DirectOutput(vec![
+                "Usage: !ai <your question>".to_string(),
+                "  Example: !ai how do I list files recursively".to_string(),
+            ]));
+        }
+
+        let mut lines = vec!["🧠 Sending to Neural...".to_string()];
+        match self.neural.ask(prompt).await {
+            Ok(response) => {
+                for line in response.lines() {
+                    lines.push(format!("  {}", line));
+                }
+            }
+            Err(e) => {
+                lines.push(format!("❌ Neural error: {}", e));
+                lines.push(String::new());
+                lines.push(
+                    "   Check that Lemonade is running with a model loaded.".to_string(),
+                );
+                lines.push("   Verify at http://localhost:8000".to_string());
+            }
+        }
+        Ok(ExecuteResult::DirectOutput(lines))
+    }
+
+    // ----------------------------------------------------------------
+    // Native commands
+    // ----------------------------------------------------------------
+
+    async fn handle_native(&self, cmd: &str, args: &[String]) -> Vec<String> {
+        match cmd {
+            "ver" | "version" => vec![
+                "⚡ Positronic v0.1.0 — Local-First Terminal".to_string(),
+                "  Neural: http://localhost:8000/api/v1".to_string(),
+                "  Reflex: active (50+ known typos + Levenshtein)".to_string(),
+            ],
+
+            "help" => vec![
+                "⚡ Positronic Commands:".to_string(),
+                String::new(),
+                "  WORKING:".to_string(),
+                "  ─────────────────────────────────────────".to_string(),
+                "  !ver                    Version info".to_string(),
+                "  !help                   This help message".to_string(),
+                "  !history [query]        Search command history".to_string(),
+                "  !clear / clear / cls    Clear the screen".to_string(),
+                "  !ai <prompt>            Ask the Neural engine (Lemonade)".to_string(),
+                "  !ask <prompt>           Alias for !ai".to_string(),
+                "  !fix <command>          Check Reflex typo correction".to_string(),
+                String::new(),
+                "  ACTIVE FEATURES:".to_string(),
+                "  ─────────────────────────────────────────".to_string(),
+                "  Reflex Engine           Auto-corrects common typos".to_string(),
+                "  Privacy Guard           Scrubs PII before AI queries".to_string(),
+                "  Vault                   Command history stored locally".to_string(),
+                String::new(),
+                "  IN PROGRESS:".to_string(),
+                "  ─────────────────────────────────────────".to_string(),
+                "  !hive scan / status     P2P (loopback only)".to_string(),
+                "  !chat <message>         Mesh chat (loopback only)".to_string(),
+                "  !io scan / connect      Hardware IO (stub)".to_string(),
+                "  !run / !wasm <path>     Script execution (stub)".to_string(),
+                "  sandbox <cmd>           Airlock sandbox (stub)".to_string(),
+                String::new(),
+                "  Any other input goes to your system shell.".to_string(),
+                "  Keyboard: Ctrl+A select all · Ctrl+C copy".to_string(),
+            ],
 
             "history" => {
                 let query = args.join(" ");
@@ -192,10 +271,9 @@ impl Runner {
                 match self.vault.search_history(search) {
                     Ok(records) => {
                         if records.is_empty() {
-                            "📜 No history found.".to_string()
+                            vec!["📜 No history found.".to_string()]
                         } else {
-                            let mut lines =
-                                vec![format!("📜 Found {} result(s):", records.len())];
+                            let mut lines = vec![format!("📜 {} result(s):", records.len())];
                             for r in records.iter().take(25) {
                                 let code = r
                                     .exit_code
@@ -203,101 +281,38 @@ impl Runner {
                                     .unwrap_or_else(|| "?".into());
                                 lines.push(format!("  [{}] {}", code, r.command));
                             }
-                            lines.join("\n")
+                            lines
                         }
                     }
-                    Err(e) => format!("❌ History error: {}", e),
+                    Err(e) => vec![format!("❌ History error: {}", e)],
                 }
             }
 
-            other => {
-                format!(
-                    "❓ Unknown command: !{}\n   Type !help for available commands.",
-                    other
-                )
-            }
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Script execution
-    // ----------------------------------------------------------------
-
-    async fn handle_script(&self, kind: &str, path: &str) -> String {
-        match kind {
-            "run" => {
-                let mut lines = vec![format!("🚀 Running script: {}", path)];
-                let p = std::path::Path::new(path);
-                match positronic_script::execute_script(p, &[]).await {
-                    Ok(output) => {
-                        for line in output.lines() {
-                            lines.push(line.to_string());
-                        }
-                    }
-                    Err(e) => lines.push(format!("❌ Script error: {}", e)),
+            "fix" => {
+                let input = args.join(" ");
+                if input.is_empty() {
+                    return vec![
+                        "Usage: !fix <command>".to_string(),
+                        "  Example: !fix gti status".to_string(),
+                    ];
                 }
-                lines.join("\n")
-            }
-            "wasm" => {
-                let mut lines = vec![format!("🧩 Loading WASM: {}", path)];
-                match std::fs::read(path) {
-                    Ok(bytes) => match self.wasm_host.run_plugin(&bytes) {
-                        Ok(()) => lines.push("✅ WASM plugin executed.".to_string()),
-                        Err(e) => lines.push(format!("❌ WASM error: {}", e)),
-                    },
-                    Err(e) => lines.push(format!("❌ Failed to read {}: {}", path, e)),
-                }
-                lines.join("\n")
-            }
-            _ => format!("❓ Unknown script type: {}", kind),
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Hive / P2P
-    // ----------------------------------------------------------------
-
-    async fn handle_hive(&self, cmd: HiveCommand) -> String {
-        match cmd {
-            HiveCommand::Scan => match self.hive.start_discovery().await {
-                Ok(()) => "📡 Discovery active. Scanning for peers...".to_string(),
-                Err(e) => format!("❌ Discovery error: {}", e),
-            },
-            HiveCommand::Status => {
-                let peer = &self.hive.local_peer;
-                [
-                    format!("📡 Hive Node: {} ({})", peer.name, peer.id),
-                    format!("   Address: {}", peer.address),
-                    format!("   Capabilities: {:?}", peer.capabilities),
-                ]
-                    .join("\n")
-            }
-            HiveCommand::Chat(msg) => {
-                match self.hive.broadcast_block(msg.clone().into_bytes()).await {
-                    Ok(()) => format!("💬 Sent: {}", msg),
-                    Err(e) => format!("❌ Broadcast error: {}", e),
+                match self.reflex.fix_command(&input) {
+                    Some(suggestion) => vec![
+                        format!("💡 Suggestion: {}", suggestion.corrected),
+                        format!(
+                            "   Confidence: {:.0}%  Source: {:?}",
+                            suggestion.confidence * 100.0,
+                            suggestion.source
+                        ),
+                    ],
+                    None => vec![format!("✅ No correction needed for: {}", input)],
                 }
             }
-        }
-    }
 
-    // ----------------------------------------------------------------
-    // Hardware IO
-    // ----------------------------------------------------------------
-
-    async fn handle_io(&self, cmd: IOCommand) -> String {
-        match cmd {
-            IOCommand::Scan | IOCommand::List => match self.io.scan_ports().await {
-                Ok(()) => {
-                    "🔌 Scanning serial ports... (results appear as devices respond)"
-                        .to_string()
-                }
-                Err(e) => format!("❌ Scan error: {}", e),
-            },
-            IOCommand::Connect(port, baud) => match self.io.connect(&port, baud).await {
-                Ok(()) => format!("🔌 Connected to {} @ {} baud", port, baud),
-                Err(e) => format!("❌ Connect error: {}", e),
-            },
+            other => vec![
+                format!("❓ Unknown command: !{}", other),
+                "   Type !help for available commands.".to_string(),
+            ],
         }
     }
 }

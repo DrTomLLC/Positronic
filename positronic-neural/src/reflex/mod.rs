@@ -115,8 +115,8 @@ pub enum SuggestionSource {
 }
 
 /// The Reflex Engine: zero-ML heuristic command correction.
-pub struct ReflexEngine {
-    /// Maximum Levenshtein distance to consider a match
+#[derive(Debug)]
+pub struct ReflexEngine {    /// Maximum Levenshtein distance to consider a match
     max_distance: usize,
     /// Minimum confidence threshold to return a suggestion
     min_confidence: f64,
