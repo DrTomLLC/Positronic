@@ -24,3 +24,5 @@ tracing = "0.1.44"
 # --- Security ---
 # Use regex to scrub sensitive data (API keys, passwords) before sending to NPU.
 regex = "1.12.3"
+chrono = "0.4.43"
+tokio = "1.49.0"

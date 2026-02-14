@@ -7,7 +7,7 @@ use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use positronic_hive::HiveNode;
 use positronic_io::HardwareMonitor;
-use positronic_neural::cortex::NeuralClient;
+use positronic_neural::cortex::{NeuralClient, SystemContext, TaskType};
 use positronic_neural::reflex::ReflexEngine;
 use positronic_script::wasm_host::WasmHost;
 
@@ -27,6 +27,25 @@ pub enum ExecuteResult {
 
 const AUTO_CORRECT_THRESHOLD: f64 = 0.8;
 
+/// Valid shell commands that must NEVER trigger Reflex suggestions.
+/// Without this whitelist, short commands like `cd` and `ps` match `cp`/`ls`
+/// via Levenshtein distance.
+const COMMON_COMMANDS: &[&str] = &[
+    "cd", "cp", "mv", "rm", "ls", "ps", "id", "df", "du", "dd",
+    "ln", "wc", "nl", "od", "bc", "dc", "fc", "fg", "bg", "at",
+    "cat", "pwd", "dir", "set", "env", "top", "man", "ssh", "scp",
+    "tar", "zip", "apt", "git", "pip", "npm", "sed", "awk", "cut",
+    "tee", "dig", "who", "yes",
+    "echo", "find", "grep", "sort", "sudo", "curl", "wget", "make",
+    "less", "more", "head", "tail", "kill", "ping", "ifconfig",
+    "mkdir", "rmdir", "touch", "chmod", "chown", "mount", "which",
+    "whoami", "uname", "rustc", "cargo", "python", "python3",
+    "node", "code", "dotnet", "java", "ruby", "perl",
+    // Windows
+    "cls", "type", "copy", "move", "ren", "del", "attrib",
+    "ipconfig", "netstat", "tasklist", "taskkill", "chkdsk",
+];
+
 #[derive(Debug)]
 pub struct Runner {
     pty: Arc<Mutex<PtyManager>>,
@@ -41,6 +60,8 @@ pub struct Runner {
     #[allow(dead_code)]
     io: Arc<HardwareMonitor>,
     reflex: ReflexEngine,
+    /// Current working directory, updated by CWD tracker in main.
+    cwd: Arc<Mutex<String>>,
 }
 
 impl Runner {
@@ -53,6 +74,9 @@ impl Runner {
         hive: Arc<HiveNode>,
         io: Arc<HardwareMonitor>,
     ) -> Self {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
         Self {
             pty,
             airlock,
@@ -62,7 +86,26 @@ impl Runner {
             hive,
             io,
             reflex: ReflexEngine::new(),
+            cwd: Arc::new(Mutex::new(cwd)),
         }
+    }
+
+    /// Update the tracked CWD (called from main when CWD changes).
+    pub async fn set_cwd(&self, path: &str) {
+        let mut cwd = self.cwd.lock().await;
+        *cwd = path.to_string();
+    }
+
+    /// Get a reference to the CWD lock for external reads.
+    pub fn cwd_handle(&self) -> Arc<Mutex<String>> {
+        self.cwd.clone()
+    }
+
+    /// Build system context for neural prompts.
+    async fn build_context(&self) -> SystemContext {
+        let cwd = self.cwd.lock().await.clone();
+        let recent = self.vault.recent_unique(5).unwrap_or_default();
+        SystemContext::gather(&cwd, recent)
     }
 
     /// Access the vault (for status bar queries from the UI).
@@ -158,28 +201,35 @@ impl Runner {
     }
 
     async fn execute_shell_command(&self, cmd: &str) -> Result<ExecuteResult> {
-        if let Some(suggestion) = self.reflex.fix_command(cmd) {
-            if suggestion.confidence >= AUTO_CORRECT_THRESHOLD {
-                let lines = vec![format!(
-                    "  💡 Auto-corrected → {} ({:.0}%, {:?})",
-                    suggestion.corrected,
-                    suggestion.confidence * 100.0,
-                    suggestion.source
-                )];
-                let _ = self.vault.log_command(&suggestion.corrected, None, None, ".", None);
-                let mut pty = self.pty.lock().await;
-                pty.write_line(&suggestion.corrected)?;
-                return Ok(ExecuteResult::DirectOutput(lines));
-            } else {
-                let hint = format!(
-                    "  💡 Did you mean: {}? ({:.0}%)",
-                    suggestion.corrected,
-                    suggestion.confidence * 100.0
-                );
-                let _ = self.vault.log_command(cmd, None, None, ".", None);
-                let mut pty = self.pty.lock().await;
-                pty.write_line(cmd)?;
-                return Ok(ExecuteResult::DirectOutput(vec![hint]));
+        // Skip Reflex for known-valid commands — prevents false positives
+        // like `cd` → "Did you mean: cp?" and `ps` → "Did you mean: ls?"
+        let first_word = cmd.split_whitespace().next().unwrap_or("");
+        let is_known = COMMON_COMMANDS.iter().any(|&c| c.eq_ignore_ascii_case(first_word));
+
+        if !is_known {
+            if let Some(suggestion) = self.reflex.fix_command(cmd) {
+                if suggestion.confidence >= AUTO_CORRECT_THRESHOLD {
+                    let lines = vec![format!(
+                        "  💡 Auto-corrected → {} ({:.0}%, {:?})",
+                        suggestion.corrected,
+                        suggestion.confidence * 100.0,
+                        suggestion.source
+                    )];
+                    let _ = self.vault.log_command(&suggestion.corrected, None, None, ".", None);
+                    let mut pty = self.pty.lock().await;
+                    pty.write_line(&suggestion.corrected)?;
+                    return Ok(ExecuteResult::DirectOutput(lines));
+                } else {
+                    let hint = format!(
+                        "  💡 Did you mean: {}? ({:.0}%)",
+                        suggestion.corrected,
+                        suggestion.confidence * 100.0
+                    );
+                    let _ = self.vault.log_command(cmd, None, None, ".", None);
+                    let mut pty = self.pty.lock().await;
+                    pty.write_line(cmd)?;
+                    return Ok(ExecuteResult::DirectOutput(vec![hint]));
+                }
             }
         }
 
@@ -196,8 +246,17 @@ impl Runner {
                 "  Example: !ai how do I list files recursively".to_string(),
             ]));
         }
-        let mut lines = vec!["🧠 Sending to Neural...".to_string()];
-        match self.neural.ask(prompt).await {
+
+        let task_type = TaskType::classify(prompt, None);
+        let context = self.build_context().await;
+
+        let model_hint = match self.neural.select_model(task_type).await {
+            Ok(m) => format!(" [{}]", m.split('/').last().unwrap_or(&m)),
+            Err(_) => String::new(),
+        };
+
+        let mut lines = vec![format!("🧠 Sending to Neural{}...", model_hint)];
+        match self.neural.ask_smart(prompt, task_type, Some(&context)).await {
             Ok(response) => {
                 for line in response.lines() {
                     lines.push(format!("  {}", line));
@@ -219,6 +278,7 @@ impl Runner {
                 "  Neural:  http://localhost:8000/api/v1".to_string(),
                 "  Reflex:  active (50+ known typos + Levenshtein)".to_string(),
                 "  Vault:   SQLite + WAL (aliases, bookmarks, stats)".to_string(),
+                "  Themes:  Default, Cyberpunk, Solarized, Monokai".to_string(),
             ],
 
             "help" => self.help_text(),
@@ -247,6 +307,19 @@ impl Runner {
             "set" => self.cmd_set(args),
             "get" => self.cmd_get(args),
 
+            // ── Smart Neural ──
+            "explain" => self.cmd_explain(args).await,
+            "suggest" => self.cmd_suggest().await,
+            "debug" => self.cmd_debug(args).await,
+
+            // ── Hardware IO ──
+            "io" => vec![
+                "🔌 Hardware IO commands:".to_string(),
+                "   !io scan      Discover serial/USB devices".to_string(),
+                "   !io list      List known devices".to_string(),
+                "   !io connect   Connect to a device".to_string(),
+            ],
+
             other => vec![
                 format!("❓ Unknown command: !{}", other),
                 "   Type !help for available commands.".to_string(),
@@ -267,12 +340,17 @@ impl Runner {
             "  !ver                       Version info".to_string(),
             "  !help                      This help message".to_string(),
             "  !clear / clear / cls       Clear screen (Ctrl+L)".to_string(),
+            "  !pwd                       Show current directory".to_string(),
+            "  !theme [name]              Switch color theme".to_string(),
             String::new(),
             "  NEURAL:".to_string(),
             "  ─────────────────────────────────────────────────".to_string(),
             "  !ai <prompt>               Ask Neural (Lemonade)".to_string(),
             "  !ask <prompt>              Alias for !ai".to_string(),
-            "  !fix <command>             Test Reflex typo correction".to_string(),
+            "  !explain <command>         AI explains a command".to_string(),
+            "  !suggest                   AI suggests next command".to_string(),
+            "  !debug <error text>        AI troubleshoots an error".to_string(),
+            "  !fix <command>             Reflex typo correction".to_string(),
             String::new(),
             "  VAULT:".to_string(),
             "  ─────────────────────────────────────────────────".to_string(),
@@ -284,13 +362,13 @@ impl Runner {
             "  ALIASES:".to_string(),
             "  ─────────────────────────────────────────────────".to_string(),
             "  !alias                     List all aliases".to_string(),
-            "  !alias set <name> <cmd>    Create/update alias".to_string(),
-            "  !alias rm <name>           Remove alias".to_string(),
+            "  !alias set <n> <cmd>       Create/update alias".to_string(),
+            "  !alias rm <n>              Remove alias".to_string(),
             String::new(),
             "  BOOKMARKS:".to_string(),
             "  ─────────────────────────────────────────────────".to_string(),
             "  !bookmark                  List bookmarks".to_string(),
-            "  !bm add <cmd> [label]      Bookmark a command".to_string(),
+            "  !bm add <cmd> [-- label]   Bookmark a command".to_string(),
             "  !bm rm <id>               Remove bookmark".to_string(),
             String::new(),
             "  CONFIG:".to_string(),
@@ -302,8 +380,7 @@ impl Runner {
             "  ─────────────────────────────────────────────────".to_string(),
             "  Up / Down                  Command history".to_string(),
             "  Ctrl+L                     Clear screen".to_string(),
-            "  Ctrl+A                     Select all output".to_string(),
-            "  Ctrl+C                     Copy selection".to_string(),
+            "  Ctrl+C                     Copy output to clipboard".to_string(),
             String::new(),
             "  IN PROGRESS:".to_string(),
             "  ─────────────────────────────────────────────────".to_string(),
@@ -312,10 +389,153 @@ impl Runner {
             "  !run / !wasm               Script execution (stub)".to_string(),
             "  sandbox <cmd>              Airlock sandbox (stub)".to_string(),
             String::new(),
-            "  Aliases are expanded automatically. Any other input".to_string(),
+            "  Aliases expand automatically. Any other input".to_string(),
             "  goes to your system shell.".to_string(),
         ]
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // Smart Neural commands
+    // ────────────────────────────────────────────────────────────────
+
+    /// !explain <command> — AI explains what a shell command does.
+    async fn cmd_explain(&self, args: &[String]) -> Vec<String> {
+        let command = args.join(" ");
+        if command.is_empty() {
+            return vec![
+                "Usage: !explain <command>".to_string(),
+                "  Example: !explain git rebase -i HEAD~3".to_string(),
+                "  Example: !explain find . -name '*.rs' -exec grep -l 'todo' {} +".to_string(),
+            ];
+        }
+
+        let mut lines = vec![format!("🧠 Explaining: {}", command)];
+
+        let prompt = format!(
+            "Explain this shell command in detail. Break it down part by part. \
+             Be concise but thorough.\n\nCommand: {}",
+            command
+        );
+
+        let context = self.build_context().await;
+        match self.neural.ask_smart(&prompt, TaskType::Code, Some(&context)).await {
+            Ok(response) => {
+                lines.push(String::new());
+                for line in response.lines() {
+                    lines.push(format!("  {}", line));
+                }
+            }
+            Err(e) => {
+                lines.push(format!("❌ Neural error: {}", e));
+                lines.push("   Check Lemonade at http://localhost:8000".to_string());
+            }
+        }
+        lines
+    }
+
+    /// !suggest — AI suggests the next command based on recent history.
+    async fn cmd_suggest(&self) -> Vec<String> {
+        // Gather recent history for context
+        let recent = match self.vault.recent_unique(15) {
+            Ok(cmds) => cmds,
+            Err(_) => vec![],
+        };
+
+        if recent.is_empty() {
+            return vec![
+                "🧠 No command history yet. Run some commands first!".to_string(),
+                "   !suggest works best after you've been working for a while.".to_string(),
+            ];
+        }
+
+        let history_context = recent
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| format!("{}. {}", i + 1, cmd))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = format!(
+            "Based on this recent command history from a developer's terminal session, \
+             suggest 1-3 commands they might want to run next. For each suggestion, \
+             give the command and a brief reason (one line each). \
+             Only suggest practical, useful next steps.\n\n\
+             Recent commands:\n{}",
+            history_context
+        );
+
+        let mut lines = vec!["🧠 Analyzing your workflow...".to_string()];
+
+        let context = self.build_context().await;
+        match self.neural.ask_smart(&prompt, TaskType::General, Some(&context)).await {
+            Ok(response) => {
+                lines.push(String::new());
+                for line in response.lines() {
+                    lines.push(format!("  {}", line));
+                }
+            }
+            Err(e) => {
+                lines.push(format!("❌ Neural error: {}", e));
+                lines.push("   Check Lemonade at http://localhost:8000".to_string());
+            }
+        }
+        lines
+    }
+
+    /// !debug <error text> — AI troubleshoots an error message.
+    async fn cmd_debug(&self, args: &[String]) -> Vec<String> {
+        let error_text = args.join(" ");
+        if error_text.is_empty() {
+            return vec![
+                "Usage: !debug <error message or text>".to_string(),
+                "  Example: !debug EACCES permission denied".to_string(),
+                "  Example: !debug cargo build failed with E0308".to_string(),
+                String::new(),
+                "  Paste any error message and Neural will help troubleshoot.".to_string(),
+            ];
+        }
+
+        // Include recent commands for context
+        let recent = self.vault.recent_unique(5).unwrap_or_default();
+        let history_ctx = if recent.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nRecent commands for context:\n{}",
+                recent.iter().map(|c| format!("  $ {}", c)).collect::<Vec<_>>().join("\n")
+            )
+        };
+
+        let prompt = format!(
+            "A developer got this error in their terminal. \
+             Diagnose the problem and suggest specific fixes. \
+             Be concise and practical. Give the exact commands to run if applicable.\n\n\
+             Error:\n{}{}",
+            error_text,
+            history_ctx
+        );
+
+        let mut lines = vec!["🧠 Diagnosing...".to_string()];
+
+        let context = self.build_context().await;
+        match self.neural.ask_smart(&prompt, TaskType::Debug, Some(&context)).await {
+            Ok(response) => {
+                lines.push(String::new());
+                for line in response.lines() {
+                    lines.push(format!("  {}", line));
+                }
+            }
+            Err(e) => {
+                lines.push(format!("❌ Neural error: {}", e));
+                lines.push("   Check Lemonade at http://localhost:8000".to_string());
+            }
+        }
+        lines
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Vault commands
+    // ────────────────────────────────────────────────────────────────
 
     fn cmd_history(&self, args: &[String]) -> Vec<String> {
         let query = args.join(" ");
@@ -376,13 +596,12 @@ impl Runner {
 
     fn cmd_alias(&self, args: &[String]) -> Vec<String> {
         if args.is_empty() {
-            // List all aliases
             match self.vault.list_aliases() {
                 Ok(aliases) => {
                     if aliases.is_empty() {
                         return vec![
                             "🔗 No aliases defined.".to_string(),
-                            "   Use: !alias set <name> <command>".to_string(),
+                            "   Use: !alias set <n> <command>".to_string(),
                         ];
                     }
                     let mut lines = vec![format!("🔗 {} alias(es):", aliases.len())];
@@ -398,7 +617,7 @@ impl Runner {
                 "set" => {
                     if args.len() < 3 {
                         return vec![
-                            "Usage: !alias set <name> <command...>".to_string(),
+                            "Usage: !alias set <n> <command...>".to_string(),
                             "  Example: !alias set gs git status".to_string(),
                         ];
                     }
@@ -411,7 +630,7 @@ impl Runner {
                 }
                 "rm" | "remove" | "del" | "delete" => {
                     if args.len() < 2 {
-                        return vec!["Usage: !alias rm <name>".to_string()];
+                        return vec!["Usage: !alias rm <n>".to_string()];
                     }
                     match self.vault.remove_alias(&args[1]) {
                         Ok(true) => vec![format!("✅ Alias '{}' removed.", args[1])],
@@ -420,7 +639,7 @@ impl Runner {
                     }
                 }
                 _ => vec![
-                    "Usage: !alias [set <name> <cmd> | rm <name>]".to_string(),
+                    "Usage: !alias [set <n> <cmd> | rm <n>]".to_string(),
                     "  !alias              List all aliases".to_string(),
                     "  !alias set gs git status".to_string(),
                     "  !alias rm gs".to_string(),
@@ -431,13 +650,12 @@ impl Runner {
 
     fn cmd_bookmark(&self, args: &[String]) -> Vec<String> {
         if args.is_empty() {
-            // List bookmarks
             match self.vault.list_bookmarks() {
                 Ok(bookmarks) => {
                     if bookmarks.is_empty() {
                         return vec![
                             "🔖 No bookmarks.".to_string(),
-                            "   Use: !bm add <command> [label]".to_string(),
+                            "   Use: !bm add <command> [-- label]".to_string(),
                         ];
                     }
                     let mut lines = vec![format!("🔖 {} bookmark(s):", bookmarks.len())];
@@ -457,10 +675,8 @@ impl Runner {
             match args[0].as_str() {
                 "add" => {
                     if args.len() < 2 {
-                        return vec!["Usage: !bm add <command> [label]".to_string()];
+                        return vec!["Usage: !bm add <command> [-- label]".to_string()];
                     }
-                    // Everything after "add" is the command. If there's a "--" separator,
-                    // content after it is the label.
                     let rest = args[1..].join(" ");
                     let (cmd, label) = if let Some(idx) = rest.find(" -- ") {
                         (&rest[..idx], Some(rest[idx + 4..].trim()))
