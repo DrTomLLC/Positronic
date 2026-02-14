@@ -129,10 +129,16 @@ impl SystemContext {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Client
+// ════════════════════════════════════════════════════════════════════
+
 /// Client for the Lemonade / OpenAI-compatible local LLM server.
 #[derive(Debug, Clone)]
 pub struct NeuralClient {
     base_url: String,
+    /// Default model name (used for display / fallback).
+    default_model: String,
     client: reqwest::Client,
     /// Cached list of available models (refreshed on first use).
     cached_models: std::sync::Arc<tokio::sync::Mutex<Option<Vec<String>>>>,
@@ -144,6 +150,8 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -172,11 +180,22 @@ struct ModelInfo {
     id: String,
 }
 
+/// Stop sequences that prevent small models from hallucinating multi-turn dialogue.
+const STOP_SEQUENCES: &[&str] = &[
+    "User:",
+    "\nUser:",
+    "Human:",
+    "\nHuman:",
+    "\n\nUser",
+    "\n\nHuman",
+];
+
 impl NeuralClient {
     /// Create a new client pointing at the Lemonade server.
-    pub fn new(base_url: &str, x: &str) -> Self {
+    pub fn new(base_url: &str, default_model: &str) -> Self {
         NeuralClient {
             base_url: base_url.trim_end_matches('/').to_string(),
+            default_model: default_model.to_string(),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
@@ -262,20 +281,27 @@ impl NeuralClient {
     /// Rough heuristic to estimate model size from its name.
     /// Returns a sortable score (higher = larger).
     fn estimate_model_size(name: &str) -> u64 {
-        // Look for patterns like "7B", "1B", "13B", "70B"
         let lower = name.to_lowercase();
         for part in lower.split(|c: char| !c.is_alphanumeric()) {
             if part.ends_with('b') {
                 if let Ok(n) = part.trim_end_matches('b').parse::<u64>() {
                     return n;
                 }
-                // Handle "0.5b" style
                 if let Ok(n) = part.trim_end_matches('b').parse::<f64>() {
                     return (n * 10.0) as u64;
                 }
             }
         }
         1 // unknown → assume small
+    }
+
+    /// Max tokens scaled by task type — keeps small models from rambling.
+    fn max_tokens_for(task_type: TaskType) -> u32 {
+        match task_type {
+            TaskType::General => 256,
+            TaskType::Code => 512,
+            TaskType::Debug => 384,
+        }
     }
 
     /// Send a prompt with automatic model selection.
@@ -291,16 +317,21 @@ impl NeuralClient {
         let system_msg = if let Some(ctx) = context {
             format!(
                 "You are a helpful terminal assistant. Be concise and practical. \
-                 Give exact commands when applicable.\n\n{}",
+                 Give exact commands when applicable. Answer the user's question \
+                 directly, then stop. Do NOT simulate follow-up questions or \
+                 generate fake User/Assistant dialogue.\n\n{}",
                 ctx.to_system_prompt()
             )
         } else {
             "You are a helpful terminal assistant. Be concise and practical. \
-             Give exact commands when applicable."
+             Give exact commands when applicable. Answer the user's question \
+             directly, then stop. Do NOT simulate follow-up questions or \
+             generate fake User/Assistant dialogue."
                 .to_string()
         };
 
-        self.send_chat(&model, &system_msg, prompt).await
+        let max_tokens = Self::max_tokens_for(task_type);
+        self.send_chat_with_stops(&model, &system_msg, prompt, max_tokens).await
     }
 
     /// Original simple ask — uses first available model, no context injection.
@@ -309,19 +340,29 @@ impl NeuralClient {
         let model = models.first()
             .ok_or_else(|| anyhow!("No models available"))?;
 
-        let system = "You are a helpful terminal assistant. Be concise and practical.";
-        self.send_chat(model, system, prompt).await
+        let system = "You are a helpful terminal assistant. Be concise and practical. \
+                      Answer the question directly, then stop.";
+        self.send_chat_with_stops(model, system, prompt, 256).await
     }
 
     /// Ask with a specific model name.
     pub async fn ask_with_model(&self, prompt: &str, model: &str) -> Result<String> {
-        let system = "You are a helpful terminal assistant. Be concise and practical.";
-        self.send_chat(model, system, prompt).await
+        let system = "You are a helpful terminal assistant. Be concise and practical. \
+                      Answer the question directly, then stop.";
+        self.send_chat_with_stops(model, system, prompt, 256).await
     }
 
-    /// Low-level chat completion call.
-    async fn send_chat(&self, model: &str, system: &str, user: &str) -> Result<String> {
+    /// Chat completion with stop sequences and post-processing.
+    async fn send_chat_with_stops(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url);
+
+        let stop_seqs: Vec<String> = STOP_SEQUENCES.iter().map(|s| s.to_string()).collect();
 
         let request = ChatRequest {
             model: model.to_string(),
@@ -335,8 +376,9 @@ impl NeuralClient {
                     content: user.to_string(),
                 },
             ],
-            max_tokens: 1024,
+            max_tokens,
             temperature: 0.3,
+            stop: Some(stop_seqs),
         };
 
         let resp = self.client.post(&url).json(&request).send().await?;
@@ -348,12 +390,50 @@ impl NeuralClient {
         }
 
         let body: ChatResponse = resp.json().await?;
-        body.choices
+        let raw = body.choices
             .first()
             .map(|c| c.message.content.clone())
-            .ok_or_else(|| anyhow!("Empty response from Lemonade"))
+            .ok_or_else(|| anyhow!("Empty response from Lemonade"))?;
+
+        // Post-process: strip any hallucinated multi-turn dialogue
+        Ok(Self::truncate_hallucinated_turns(&raw))
+    }
+
+    /// Legacy send_chat — kept for backward compat, routes through new method.
+    #[allow(dead_code)]
+    async fn send_chat(&self, model: &str, system: &str, user: &str) -> Result<String> {
+        self.send_chat_with_stops(model, system, user, 256).await
+    }
+
+    /// Strip hallucinated multi-turn conversation from the response.
+    /// Small models (1B–3B) frequently generate fake "User:" / "Assistant:" turns.
+    fn truncate_hallucinated_turns(response: &str) -> String {
+        let markers = [
+            "\nUser:",
+            "\nHuman:",
+            "\nAssistant:",
+            "\n\nUser:",
+            "\n\nHuman:",
+            "\n\nAssistant:",
+            "\n\n---\n",
+        ];
+
+        let mut end = response.len();
+        for marker in &markers {
+            if let Some(pos) = response.find(marker) {
+                if pos > 0 && pos < end {
+                    end = pos;
+                }
+            }
+        }
+
+        response[..end].trim().to_string()
     }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Tests
+// ════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -393,20 +473,45 @@ mod tests {
 
     #[test]
     fn test_command_hint_overrides() {
-        // Even if the prompt looks general, command hint wins
         assert_eq!(
             TaskType::classify("what is this", Some("explain")),
             TaskType::Code
         );
         assert_eq!(
-            TaskType::classify("fix the error", Some("ask")),
+            TaskType::classify("what is this", Some("debug")),
+            TaskType::Debug
+        );
+        assert_eq!(
+            TaskType::classify("write code for me", Some("ask")),
             TaskType::General
         );
     }
 
     #[test]
     fn test_model_size_estimation() {
-        assert!(NeuralClient::estimate_model_size("Qwen2.5-Coder-7B-Instruct") >
-            NeuralClient::estimate_model_size("AMD-OLMo-1B-SFT-DPO"));
+        assert!(NeuralClient::estimate_model_size("llama-7B") > NeuralClient::estimate_model_size("phi-1B"));
+        assert!(NeuralClient::estimate_model_size("deepseek-coder-33b") > NeuralClient::estimate_model_size("olmo-1b"));
+    }
+
+    #[test]
+    fn test_truncate_hallucinated_turns() {
+        let clean = "The answer is 42.";
+        assert_eq!(NeuralClient::truncate_hallucinated_turns(clean), "The answer is 42.");
+
+        let dirty = "The answer is 42.\n\nUser: What about 43?\n\nAssistant: That too.";
+        assert_eq!(NeuralClient::truncate_hallucinated_turns(dirty), "The answer is 42.");
+
+        let dirty2 = "Hello world.\nUser: follow up\nAssistant: more garbage";
+        assert_eq!(NeuralClient::truncate_hallucinated_turns(dirty2), "Hello world.");
+
+        let dirty3 = "Some response.\n\nHuman: fake question\n\nAssistant: fake answer";
+        assert_eq!(NeuralClient::truncate_hallucinated_turns(dirty3), "Some response.");
+    }
+
+    #[test]
+    fn test_max_tokens_scaling() {
+        assert_eq!(NeuralClient::max_tokens_for(TaskType::General), 256);
+        assert_eq!(NeuralClient::max_tokens_for(TaskType::Code), 512);
+        assert_eq!(NeuralClient::max_tokens_for(TaskType::Debug), 384);
     }
 }

@@ -1,845 +1,314 @@
-use crate::airlock::Airlock;
-use crate::pty_manager::PtyManager;
-use crate::runtime::parser::{CommandParser, CommandType, HiveCommand, IOCommand};
-use crate::vault::Vault;
+//! # Reflex Engine
+//!
+//! The "Instinct" Layer (Tier 3) - Heuristic command correction.
+//! Uses Levenshtein distance and pattern matching for common typos.
+//! Zero-ML fallback that works without NPU or network connectivity.
+//!
+//! Eventually this will also wrap `ort` (ONNX Runtime) to run a
+//! quantized SLM locally for Tier 2 inference.
 
-use anyhow::Result;
-use chrono::{TimeZone, Utc};
-use positronic_hive::HiveNode;
-use positronic_io::HardwareMonitor;
-use positronic_neural::cortex::{NeuralClient, SystemContext, TaskType};
-use positronic_neural::reflex::ReflexEngine;
-use positronic_script::wasm_host::WasmHost;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
-use std::sync::Arc;
-use tokio::sync::Mutex;
+/// Known command corrections: common typos -> correct commands
+static KNOWN_TYPOS: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 
-/// Result of executing a command — tells the UI what to display.
-#[derive(Debug, Clone)]
-pub enum ExecuteResult {
-    /// Command was sent to the PTY shell. UI waits for snapshot redraws.
-    SentToPty,
-    /// Command produced direct output (bypass PTY). Display these lines.
-    DirectOutput(Vec<String>),
-    /// Clear the screen. PTY has already been sent cls/clear.
-    ClearScreen,
+/// Common shell commands used for Levenshtein matching
+static COMMON_COMMANDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+fn known_typos() -> &'static HashMap<&'static str, &'static str> {
+    KNOWN_TYPOS.get_or_init(|| {
+        let mut m = HashMap::new();
+        // Git typos
+        m.insert("git psuh", "git push");
+        m.insert("git pul", "git pull");
+        m.insert("git comit", "git commit");
+        m.insert("git commti", "git commit");
+        m.insert("git sttaus", "git status");
+        m.insert("git statis", "git status");
+        m.insert("git stauts", "git status");
+        m.insert("git chekout", "git checkout");
+        m.insert("git chekcout", "git checkout");
+        m.insert("git brnach", "git branch");
+        m.insert("git branh", "git branch");
+        m.insert("git marge", "git merge");
+        m.insert("git staus", "git status");
+        m.insert("git ad", "git add");
+        m.insert("git dif", "git diff");
+        m.insert("git lgo", "git log");
+        m.insert("git fetc", "git fetch");
+        m.insert("git rbase", "git rebase");
+        m.insert("git reste", "git reset");
+        // Cargo typos
+        m.insert("carog build", "cargo build");
+        m.insert("cargo biuld", "cargo build");
+        m.insert("cargo buld", "cargo build");
+        m.insert("cargo tset", "cargo test");
+        m.insert("cargo tes", "cargo test");
+        m.insert("cargo rn", "cargo run");
+        m.insert("cargo chesk", "cargo check");
+        m.insert("cargo clipppy", "cargo clippy");
+        m.insert("crago", "cargo");
+        // Common CLI typos
+        m.insert("cta", "cat");
+        m.insert("sl", "ls");
+        m.insert("pyhton", "python");
+        m.insert("pytohn", "python");
+        m.insert("pyton", "python");
+        m.insert("ndoe", "node");
+        m.insert("noed", "node");
+        m.insert("dokcer", "docker");
+        m.insert("dcoker", "docker");
+        m.insert("kuebctl", "kubectl");
+        m.insert("kubeclt", "kubectl");
+        m.insert("mkidr", "mkdir");
+        m.insert("mdkir", "mkdir");
+        m.insert("claer", "clear");
+        m.insert("cealr", "clear");
+        m.insert("grpe", "grep");
+        m.insert("gerp", "grep");
+        m.insert("les", "less");
+        m.insert("mroe", "more");
+        m.insert("tial", "tail");
+        m.insert("ehco", "echo");
+        m.insert("ecoh", "echo");
+        m.insert("sudp", "sudo");
+        m.insert("suod", "sudo");
+        m.insert("cd..", "cd ..");
+        m.insert("cd...", "cd ../..");
+        m
+    })
 }
 
-const AUTO_CORRECT_THRESHOLD: f64 = 0.8;
-
-/// Valid shell commands that must NEVER trigger Reflex suggestions.
-/// Without this whitelist, short commands like `cd` and `ps` match `cp`/`ls`
-/// via Levenshtein distance.
-const COMMON_COMMANDS: &[&str] = &[
-    "cd", "cp", "mv", "rm", "ls", "ps", "id", "df", "du", "dd",
-    "ln", "wc", "nl", "od", "bc", "dc", "fc", "fg", "bg", "at",
-    "cat", "pwd", "dir", "set", "env", "top", "man", "ssh", "scp",
-    "tar", "zip", "apt", "git", "pip", "npm", "sed", "awk", "cut",
-    "tee", "dig", "who", "yes",
-    "echo", "find", "grep", "sort", "sudo", "curl", "wget", "make",
-    "less", "more", "head", "tail", "kill", "ping", "ifconfig",
-    "mkdir", "rmdir", "touch", "chmod", "chown", "mount", "which",
-    "whoami", "uname", "rustc", "cargo", "python", "python3",
-    "node", "code", "dotnet", "java", "ruby", "perl",
-    // Windows
-    "cls", "type", "copy", "move", "ren", "del", "attrib",
-    "ipconfig", "netstat", "tasklist", "taskkill", "chkdsk",
-];
-
-#[derive(Debug)]
-pub struct Runner {
-    pty: Arc<Mutex<PtyManager>>,
-    #[allow(dead_code)]
-    airlock: Arc<Airlock>,
-    neural: Arc<NeuralClient>,
-    vault: Vault,
-    #[allow(dead_code)]
-    wasm_host: Arc<WasmHost>,
-    #[allow(dead_code)]
-    hive: Arc<HiveNode>,
-    #[allow(dead_code)]
-    io: Arc<HardwareMonitor>,
-    reflex: ReflexEngine,
-    /// Current working directory, updated by CWD tracker in main.
-    cwd: Arc<Mutex<String>>,
-}
-
-impl Runner {
-    pub fn new(
-        pty: Arc<Mutex<PtyManager>>,
-        airlock: Arc<Airlock>,
-        neural: Arc<NeuralClient>,
-        vault: Vault,
-        wasm_host: Arc<WasmHost>,
-        hive: Arc<HiveNode>,
-        io: Arc<HardwareMonitor>,
-    ) -> Self {
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| ".".to_string());
-        Self {
-            pty,
-            airlock,
-            neural,
-            vault,
-            wasm_host,
-            hive,
-            io,
-            reflex: ReflexEngine::new(),
-            cwd: Arc::new(Mutex::new(cwd)),
-        }
-    }
-
-    /// Update the tracked CWD (called from main when CWD changes).
-    pub async fn set_cwd(&self, path: &str) {
-        let mut cwd = self.cwd.lock().await;
-        *cwd = path.to_string();
-    }
-
-    /// Get a reference to the CWD lock for external reads.
-    pub fn cwd_handle(&self) -> Arc<Mutex<String>> {
-        self.cwd.clone()
-    }
-
-    /// Build system context for neural prompts.
-    async fn build_context(&self) -> SystemContext {
-        let cwd = self.cwd.lock().await.clone();
-        let recent = self.vault.recent_unique(5).unwrap_or_default();
-        SystemContext::gather(&cwd, recent)
-    }
-
-    /// Access the vault (for status bar queries from the UI).
-    pub fn vault(&self) -> &Vault {
-        &self.vault
-    }
-
-    pub async fn execute(&self, data: &str) -> Result<ExecuteResult> {
-        let normalized = data
-            .replace("\r\n", "\n")
-            .trim_end_matches('\n')
-            .to_string();
-
-        if normalized.trim().is_empty() {
-            let mut pty = self.pty.lock().await;
-            let _ = pty.write_line("");
-            return Ok(ExecuteResult::SentToPty);
-        }
-
-        let lower = normalized.trim().to_lowercase();
-        if lower == "clear" || lower == "cls" || lower == "!clear" {
-            let mut pty = self.pty.lock().await;
-            if cfg!(windows) {
-                pty.write_line("cls")?;
-            } else {
-                pty.write_line("clear")?;
-            }
-            return Ok(ExecuteResult::ClearScreen);
-        }
-
-        // ── Alias expansion ──
-        // Check if the first word matches an alias before parsing.
-        let effective = self.expand_alias(&normalized);
-
-        let parsed = CommandParser::parse(&effective);
-
-        match parsed {
-            CommandType::Legacy(cmd) => self.execute_shell_command(&cmd).await,
-
-            CommandType::Native(cmd, args) => {
-                let lines = self.handle_native(&cmd, &args).await;
-                Ok(ExecuteResult::DirectOutput(lines))
-            }
-
-            CommandType::Neural(prompt) => self.handle_neural(&prompt).await,
-
-            CommandType::Sandboxed(_) => Ok(ExecuteResult::DirectOutput(vec![
-                "🔒 Airlock sandboxing — not yet implemented.".to_string(),
-            ])),
-
-            CommandType::Script(kind, path) => Ok(ExecuteResult::DirectOutput(vec![
-                format!("🚀 !{} {} — not yet implemented.", kind, path),
-            ])),
-
-            CommandType::Hive(hive_cmd) => {
-                let msg = match hive_cmd {
-                    HiveCommand::Scan => "📡 Hive peer discovery — not yet implemented.",
-                    HiveCommand::Status => "📡 Hive is in loopback simulation mode.",
-                    HiveCommand::Chat(_) => "💬 Hive mesh chat — not yet implemented.",
-                };
-                Ok(ExecuteResult::DirectOutput(vec![msg.to_string()]))
-            }
-
-            CommandType::IO(io_cmd) => {
-                let msg = match io_cmd {
-                    IOCommand::Scan | IOCommand::List => "🔌 Hardware IO — not yet implemented.",
-                    IOCommand::Connect(_, _) => "🔌 Serial connection — not yet implemented.",
-                };
-                Ok(ExecuteResult::DirectOutput(vec![msg.to_string()]))
-            }
-        }
-    }
-
-    /// Expand the first word of input if it matches a stored alias.
-    fn expand_alias(&self, input: &str) -> String {
-        let trimmed = input.trim();
-        if trimmed.starts_with('!') {
-            // Don't expand aliases on native commands
-            return input.to_string();
-        }
-        let first_word = trimmed.split_whitespace().next().unwrap_or("");
-        match self.vault.get_alias(first_word) {
-            Ok(Some(expansion)) => {
-                let rest = trimmed.strip_prefix(first_word).unwrap_or("").trim_start();
-                if rest.is_empty() {
-                    expansion
-                } else {
-                    format!("{} {}", expansion, rest)
-                }
-            }
-            _ => input.to_string(),
-        }
-    }
-
-    async fn execute_shell_command(&self, cmd: &str) -> Result<ExecuteResult> {
-        // Skip Reflex for known-valid commands — prevents false positives
-        // like `cd` → "Did you mean: cp?" and `ps` → "Did you mean: ls?"
-        let first_word = cmd.split_whitespace().next().unwrap_or("");
-        let is_known = COMMON_COMMANDS.iter().any(|&c| c.eq_ignore_ascii_case(first_word));
-
-        if !is_known {
-            if let Some(suggestion) = self.reflex.fix_command(cmd) {
-                if suggestion.confidence >= AUTO_CORRECT_THRESHOLD {
-                    let lines = vec![format!(
-                        "  💡 Auto-corrected → {} ({:.0}%, {:?})",
-                        suggestion.corrected,
-                        suggestion.confidence * 100.0,
-                        suggestion.source
-                    )];
-                    let _ = self.vault.log_command(&suggestion.corrected, None, None, ".", None);
-                    let mut pty = self.pty.lock().await;
-                    pty.write_line(&suggestion.corrected)?;
-                    return Ok(ExecuteResult::DirectOutput(lines));
-                } else {
-                    let hint = format!(
-                        "  💡 Did you mean: {}? ({:.0}%)",
-                        suggestion.corrected,
-                        suggestion.confidence * 100.0
-                    );
-                    let _ = self.vault.log_command(cmd, None, None, ".", None);
-                    let mut pty = self.pty.lock().await;
-                    pty.write_line(cmd)?;
-                    return Ok(ExecuteResult::DirectOutput(vec![hint]));
-                }
-            }
-        }
-
-        let _ = self.vault.log_command(cmd, None, None, ".", None);
-        let mut pty = self.pty.lock().await;
-        pty.write_line(cmd)?;
-        Ok(ExecuteResult::SentToPty)
-    }
-
-    async fn handle_neural(&self, prompt: &str) -> Result<ExecuteResult> {
-        if prompt.trim().is_empty() {
-            return Ok(ExecuteResult::DirectOutput(vec![
-                "Usage: !ai <your question>".to_string(),
-                "  Example: !ai how do I list files recursively".to_string(),
-            ]));
-        }
-
-        let task_type = TaskType::classify(prompt, None);
-        let context = self.build_context().await;
-
-        let model_hint = match self.neural.select_model(task_type).await {
-            Ok(m) => format!(" [{}]", m.split('/').last().unwrap_or(&m)),
-            Err(_) => String::new(),
-        };
-
-        let mut lines = vec![format!("🧠 Sending to Neural{}...", model_hint)];
-        match self.neural.ask_smart(prompt, task_type, Some(&context)).await {
-            Ok(response) => {
-                for line in response.lines() {
-                    lines.push(format!("  {}", line));
-                }
-            }
-            Err(e) => {
-                lines.push(format!("❌ Neural error: {}", e));
-                lines.push("   Check Lemonade at http://localhost:8000".to_string());
-            }
-        }
-        Ok(ExecuteResult::DirectOutput(lines))
-    }
-
-    async fn handle_native(&self, cmd: &str, args: &[String]) -> Vec<String> {
-        match cmd {
-            // ── Info ──
-            "ver" | "version" => vec![
-                "⚡ Positronic v0.2.0 — Local-First Terminal".to_string(),
-                "  Neural:  http://localhost:8000/api/v1".to_string(),
-                "  Reflex:  active (50+ known typos + Levenshtein)".to_string(),
-                "  Vault:   SQLite + WAL (aliases, bookmarks, stats)".to_string(),
-                "  Themes:  Default, Cyberpunk, Solarized, Monokai".to_string(),
-            ],
-
-            "help" => self.help_text(),
-
-            // ── History ──
-            "history" => self.cmd_history(args),
-
-            "top" => self.cmd_top(args),
-
-            // ── Aliases ──
-            "alias" => self.cmd_alias(args),
-
-            // ── Bookmarks ──
-            "bookmark" | "bm" => self.cmd_bookmark(args),
-
-            // ── Stats ──
-            "stats" => self.cmd_stats(),
-
-            // ── Export ──
-            "export" => self.cmd_export(args),
-
-            // ── Reflex ──
-            "fix" => self.cmd_fix(args),
-
-            // ── Config ──
-            "set" => self.cmd_set(args),
-            "get" => self.cmd_get(args),
-
-            // ── Smart Neural ──
-            "explain" => self.cmd_explain(args).await,
-            "suggest" => self.cmd_suggest().await,
-            "debug" => self.cmd_debug(args).await,
-
-            // ── Hardware IO ──
-            "io" => vec![
-                "🔌 Hardware IO commands:".to_string(),
-                "   !io scan      Discover serial/USB devices".to_string(),
-                "   !io list      List known devices".to_string(),
-                "   !io connect   Connect to a device".to_string(),
-            ],
-
-            other => vec![
-                format!("❓ Unknown command: !{}", other),
-                "   Type !help for available commands.".to_string(),
-            ],
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    // Command implementations
-    // ════════════════════════════════════════════════════════════════
-
-    fn help_text(&self) -> Vec<String> {
+fn common_commands() -> &'static Vec<&'static str> {
+    COMMON_COMMANDS.get_or_init(|| {
         vec![
-            "⚡ Positronic Commands:".to_string(),
-            String::new(),
-            "  CORE:".to_string(),
-            "  ─────────────────────────────────────────────────".to_string(),
-            "  !ver                       Version info".to_string(),
-            "  !help                      This help message".to_string(),
-            "  !clear / clear / cls       Clear screen (Ctrl+L)".to_string(),
-            "  !pwd                       Show current directory".to_string(),
-            "  !theme [name]              Switch color theme".to_string(),
-            String::new(),
-            "  NEURAL:".to_string(),
-            "  ─────────────────────────────────────────────────".to_string(),
-            "  !ai <prompt>               Ask Neural (Lemonade)".to_string(),
-            "  !ask <prompt>              Alias for !ai".to_string(),
-            "  !explain <command>         AI explains a command".to_string(),
-            "  !suggest                   AI suggests next command".to_string(),
-            "  !debug <error text>        AI troubleshoots an error".to_string(),
-            "  !fix <command>             Reflex typo correction".to_string(),
-            String::new(),
-            "  VAULT:".to_string(),
-            "  ─────────────────────────────────────────────────".to_string(),
-            "  !history [query]           Search command history".to_string(),
-            "  !top [N]                   Most-used commands".to_string(),
-            "  !stats                     Vault statistics".to_string(),
-            "  !export [limit]            Export history to text".to_string(),
-            String::new(),
-            "  ALIASES:".to_string(),
-            "  ─────────────────────────────────────────────────".to_string(),
-            "  !alias                     List all aliases".to_string(),
-            "  !alias set <n> <cmd>       Create/update alias".to_string(),
-            "  !alias rm <n>              Remove alias".to_string(),
-            String::new(),
-            "  BOOKMARKS:".to_string(),
-            "  ─────────────────────────────────────────────────".to_string(),
-            "  !bookmark                  List bookmarks".to_string(),
-            "  !bm add <cmd> [-- label]   Bookmark a command".to_string(),
-            "  !bm rm <id>               Remove bookmark".to_string(),
-            String::new(),
-            "  CONFIG:".to_string(),
-            "  ─────────────────────────────────────────────────".to_string(),
-            "  !set <key> <value>         Set a config value".to_string(),
-            "  !get <key>                 Get a config value".to_string(),
-            String::new(),
-            "  KEYBOARD:".to_string(),
-            "  ─────────────────────────────────────────────────".to_string(),
-            "  Up / Down                  Command history".to_string(),
-            "  Ctrl+L                     Clear screen".to_string(),
-            "  Ctrl+C                     Copy output to clipboard".to_string(),
-            String::new(),
-            "  IN PROGRESS:".to_string(),
-            "  ─────────────────────────────────────────────────".to_string(),
-            "  !hive / !chat              P2P mesh (loopback only)".to_string(),
-            "  !io scan / connect         Hardware IO (stub)".to_string(),
-            "  !run / !wasm               Script execution (stub)".to_string(),
-            "  sandbox <cmd>              Airlock sandbox (stub)".to_string(),
-            String::new(),
-            "  Aliases expand automatically. Any other input".to_string(),
-            "  goes to your system shell.".to_string(),
+            "git", "cargo", "rustup", "npm", "node", "python", "pip", "docker", "kubectl", "ls",
+            "cd", "cat", "grep", "find", "mkdir", "rmdir", "rm", "cp", "mv", "touch", "chmod",
+            "chown", "echo", "less", "more", "head", "tail", "sort", "uniq", "wc", "sed", "awk",
+            "curl", "wget", "ssh", "scp", "tar", "zip", "unzip", "make", "cmake", "gcc", "clear",
+            "history", "man", "which", "whereis", "sudo", "apt", "brew", "pacman", "dnf", "yum",
         ]
-    }
+    })
+}
 
-    // ────────────────────────────────────────────────────────────────
-    // Smart Neural commands
-    // ────────────────────────────────────────────────────────────────
+/// A suggestion from the Reflex Engine
+#[derive(Debug, Clone, PartialEq)]
+pub struct Suggestion {
+    /// The corrected command
+    pub corrected: String,
+    /// Confidence score (0.0 - 1.0)
+    pub confidence: f64,
+    /// Source of the suggestion
+    pub source: SuggestionSource,
+}
 
-    /// !explain <command> — AI explains what a shell command does.
-    async fn cmd_explain(&self, args: &[String]) -> Vec<String> {
-        let command = args.join(" ");
-        if command.is_empty() {
-            return vec![
-                "Usage: !explain <command>".to_string(),
-                "  Example: !explain git rebase -i HEAD~3".to_string(),
-                "  Example: !explain find . -name '*.rs' -exec grep -l 'todo' {} +".to_string(),
-            ];
-        }
+/// How the suggestion was derived
+#[derive(Debug, Clone, PartialEq)]
+pub enum SuggestionSource {
+    /// Exact match from known typo database
+    KnownTypo,
+    /// Levenshtein distance match against common commands
+    Levenshtein,
+    /// Character transposition detection
+    Transposition,
+}
 
-        let mut lines = vec![format!("🧠 Explaining: {}", command)];
+/// The Reflex Engine: zero-ML heuristic command correction.
+#[derive(Debug)]
+pub struct ReflexEngine {
+    /// Maximum Levenshtein distance to consider a match
+    max_distance: usize,
+    /// Minimum confidence threshold to return a suggestion.
+    /// Raised from 0.40 → 0.55 to prevent false positives like
+    /// exit→git (0.50), quit→git (0.50), abort→sort (0.60).
+    min_confidence: f64,
+}
 
-        let prompt = format!(
-            "Explain this shell command in detail. Break it down part by part. \
-             Be concise but thorough.\n\nCommand: {}",
-            command
-        );
-
-        let context = self.build_context().await;
-        match self.neural.ask_smart(&prompt, TaskType::Code, Some(&context)).await {
-            Ok(response) => {
-                lines.push(String::new());
-                for line in response.lines() {
-                    lines.push(format!("  {}", line));
-                }
-            }
-            Err(e) => {
-                lines.push(format!("❌ Neural error: {}", e));
-                lines.push("   Check Lemonade at http://localhost:8000".to_string());
-            }
-        }
-        lines
-    }
-
-    /// !suggest — AI suggests the next command based on recent history.
-    async fn cmd_suggest(&self) -> Vec<String> {
-        // Gather recent history for context
-        let recent = match self.vault.recent_unique(15) {
-            Ok(cmds) => cmds,
-            Err(_) => vec![],
-        };
-
-        if recent.is_empty() {
-            return vec![
-                "🧠 No command history yet. Run some commands first!".to_string(),
-                "   !suggest works best after you've been working for a while.".to_string(),
-            ];
-        }
-
-        let history_context = recent
-            .iter()
-            .enumerate()
-            .map(|(i, cmd)| format!("{}. {}", i + 1, cmd))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let prompt = format!(
-            "Based on this recent command history from a developer's terminal session, \
-             suggest 1-3 commands they might want to run next. For each suggestion, \
-             give the command and a brief reason (one line each). \
-             Only suggest practical, useful next steps.\n\n\
-             Recent commands:\n{}",
-            history_context
-        );
-
-        let mut lines = vec!["🧠 Analyzing your workflow...".to_string()];
-
-        let context = self.build_context().await;
-        match self.neural.ask_smart(&prompt, TaskType::General, Some(&context)).await {
-            Ok(response) => {
-                lines.push(String::new());
-                for line in response.lines() {
-                    lines.push(format!("  {}", line));
-                }
-            }
-            Err(e) => {
-                lines.push(format!("❌ Neural error: {}", e));
-                lines.push("   Check Lemonade at http://localhost:8000".to_string());
-            }
-        }
-        lines
-    }
-
-    /// !debug <error text> — AI troubleshoots an error message.
-    async fn cmd_debug(&self, args: &[String]) -> Vec<String> {
-        let error_text = args.join(" ");
-        if error_text.is_empty() {
-            return vec![
-                "Usage: !debug <error message or text>".to_string(),
-                "  Example: !debug EACCES permission denied".to_string(),
-                "  Example: !debug cargo build failed with E0308".to_string(),
-                String::new(),
-                "  Paste any error message and Neural will help troubleshoot.".to_string(),
-            ];
-        }
-
-        // Include recent commands for context
-        let recent = self.vault.recent_unique(5).unwrap_or_default();
-        let history_ctx = if recent.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\n\nRecent commands for context:\n{}",
-                recent.iter().map(|c| format!("  $ {}", c)).collect::<Vec<_>>().join("\n")
-            )
-        };
-
-        let prompt = format!(
-            "A developer got this error in their terminal. \
-             Diagnose the problem and suggest specific fixes. \
-             Be concise and practical. Give the exact commands to run if applicable.\n\n\
-             Error:\n{}{}",
-            error_text,
-            history_ctx
-        );
-
-        let mut lines = vec!["🧠 Diagnosing...".to_string()];
-
-        let context = self.build_context().await;
-        match self.neural.ask_smart(&prompt, TaskType::Debug, Some(&context)).await {
-            Ok(response) => {
-                lines.push(String::new());
-                for line in response.lines() {
-                    lines.push(format!("  {}", line));
-                }
-            }
-            Err(e) => {
-                lines.push(format!("❌ Neural error: {}", e));
-                lines.push("   Check Lemonade at http://localhost:8000".to_string());
-            }
-        }
-        lines
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // Vault commands
-    // ────────────────────────────────────────────────────────────────
-
-    fn cmd_history(&self, args: &[String]) -> Vec<String> {
-        let query = args.join(" ");
-        let search = if query.is_empty() { "%" } else { &query };
-        match self.vault.search_history(search) {
-            Ok(records) => {
-                if records.is_empty() {
-                    vec!["📜 No history found.".to_string()]
-                } else {
-                    let mut lines = vec![format!("📜 {} result(s):", records.len())];
-                    for r in records.iter().take(25) {
-                        let code = r.exit_code
-                            .map(|c| format!("{}", c))
-                            .unwrap_or_else(|| "·".into());
-                        let time = format_timestamp(r.timestamp);
-                        let dir_display = if r.directory == "." {
-                            String::new()
-                        } else {
-                            format!(" ({})", short_path(&r.directory))
-                        };
-                        lines.push(format!(
-                            "  [{}] {} {}{}",
-                            code, time, r.command, dir_display
-                        ));
-                    }
-                    lines
-                }
-            }
-            Err(e) => vec![format!("❌ History error: {}", e)],
+impl ReflexEngine {
+    pub fn new() -> Self {
+        Self {
+            max_distance: 3,
+            min_confidence: 0.55,
         }
     }
 
-    fn cmd_top(&self, args: &[String]) -> Vec<String> {
-        let limit: usize = args.first()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10);
-
-        match self.vault.top_commands(limit) {
-            Ok(top) => {
-                if top.is_empty() {
-                    return vec!["📊 No history yet.".to_string()];
-                }
-                let mut lines = vec![format!("📊 Top {} commands:", top.len())];
-                let max_count = top.first().map(|t| t.count).unwrap_or(1);
-                for t in &top {
-                    let bar_len = ((t.count as f64 / max_count as f64) * 20.0) as usize;
-                    let bar: String = "█".repeat(bar_len);
-                    lines.push(format!(
-                        "  {:>4}x  {}  {}",
-                        t.count, bar, t.command
-                    ));
-                }
-                lines
-            }
-            Err(e) => vec![format!("❌ Error: {}", e)],
+    /// Create a ReflexEngine with custom thresholds.
+    pub fn with_thresholds(max_distance: usize, min_confidence: f64) -> Self {
+        Self {
+            max_distance,
+            min_confidence,
         }
     }
 
-    fn cmd_alias(&self, args: &[String]) -> Vec<String> {
-        if args.is_empty() {
-            match self.vault.list_aliases() {
-                Ok(aliases) => {
-                    if aliases.is_empty() {
-                        return vec![
-                            "🔗 No aliases defined.".to_string(),
-                            "   Use: !alias set <n> <command>".to_string(),
-                        ];
-                    }
-                    let mut lines = vec![format!("🔗 {} alias(es):", aliases.len())];
-                    for a in &aliases {
-                        lines.push(format!("  {} → {}", a.name, a.expansion));
-                    }
-                    lines
-                }
-                Err(e) => vec![format!("❌ Error: {}", e)],
-            }
-        } else {
-            match args[0].as_str() {
-                "set" => {
-                    if args.len() < 3 {
-                        return vec![
-                            "Usage: !alias set <n> <command...>".to_string(),
-                            "  Example: !alias set gs git status".to_string(),
-                        ];
-                    }
-                    let name = &args[1];
-                    let expansion = args[2..].join(" ");
-                    match self.vault.set_alias(name, &expansion) {
-                        Ok(()) => vec![format!("✅ Alias set: {} → {}", name, expansion)],
-                        Err(e) => vec![format!("❌ Error: {}", e)],
-                    }
-                }
-                "rm" | "remove" | "del" | "delete" => {
-                    if args.len() < 2 {
-                        return vec!["Usage: !alias rm <n>".to_string()];
-                    }
-                    match self.vault.remove_alias(&args[1]) {
-                        Ok(true) => vec![format!("✅ Alias '{}' removed.", args[1])],
-                        Ok(false) => vec![format!("❓ Alias '{}' not found.", args[1])],
-                        Err(e) => vec![format!("❌ Error: {}", e)],
-                    }
-                }
-                _ => vec![
-                    "Usage: !alias [set <n> <cmd> | rm <n>]".to_string(),
-                    "  !alias              List all aliases".to_string(),
-                    "  !alias set gs git status".to_string(),
-                    "  !alias rm gs".to_string(),
-                ],
+    /// Attempt to fix a mistyped command.
+    /// Returns `Some(Suggestion)` if a correction is found above the confidence threshold.
+    pub fn fix_command(&self, input: &str) -> Option<Suggestion> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // Strategy 1: Check the known typo database (highest confidence)
+        if let Some(suggestion) = self.check_known_typos(trimmed) {
+            return Some(suggestion);
+        }
+
+        // Strategy 2: Try to fix just the first word (the command itself)
+        if let Some(suggestion) = self.fix_first_word(trimmed) {
+            if suggestion.confidence >= self.min_confidence {
+                return Some(suggestion);
             }
         }
+
+        None
     }
 
-    fn cmd_bookmark(&self, args: &[String]) -> Vec<String> {
-        if args.is_empty() {
-            match self.vault.list_bookmarks() {
-                Ok(bookmarks) => {
-                    if bookmarks.is_empty() {
-                        return vec![
-                            "🔖 No bookmarks.".to_string(),
-                            "   Use: !bm add <command> [-- label]".to_string(),
-                        ];
+    /// Check against the known typo database for exact matches.
+    fn check_known_typos(&self, input: &str) -> Option<Suggestion> {
+        let lower = input.to_lowercase();
+        let typos = known_typos();
+
+        // Try full command match first
+        if let Some(corrected) = typos.get(lower.as_str()) {
+            return Some(Suggestion {
+                corrected: corrected.to_string(),
+                confidence: 1.0,
+                source: SuggestionSource::KnownTypo,
+            });
+        }
+
+        // Try matching just the first word against known single-word typos
+        let first_word = lower.split_whitespace().next()?;
+        if let Some(corrected) = typos.get(first_word) {
+            let rest: String = input.trim().chars().skip(first_word.len()).collect();
+            return Some(Suggestion {
+                corrected: format!("{}{}", corrected, rest),
+                confidence: 0.95,
+                source: SuggestionSource::KnownTypo,
+            });
+        }
+
+        None
+    }
+
+    /// Fix the first word of the command using Levenshtein distance.
+    fn fix_first_word(&self, input: &str) -> Option<Suggestion> {
+        let mut split = input.splitn(2, char::is_whitespace);
+        let first_word_raw = split.next()?;
+        let first_word = first_word_raw.to_lowercase();
+        let rest = split.next().map(|s| format!(" {}", s)).unwrap_or_default();
+
+        // Check for transposition first (higher confidence)
+        if let Some(corrected) = self.detect_transposition(&first_word) {
+            return Some(Suggestion {
+                corrected: format!("{}{}", corrected, rest),
+                confidence: 0.85,
+                source: SuggestionSource::Transposition,
+            });
+        }
+
+        // Levenshtein distance matching
+        let mut best_match: Option<(&str, usize)> = None;
+
+        for cmd in common_commands() {
+            let dist = levenshtein_distance(&first_word, cmd);
+            if dist <= self.max_distance && dist > 0 {
+                match best_match {
+                    None => best_match = Some((cmd, dist)),
+                    Some((_, best_dist)) if dist < best_dist => {
+                        best_match = Some((cmd, dist));
                     }
-                    let mut lines = vec![format!("🔖 {} bookmark(s):", bookmarks.len())];
-                    for b in &bookmarks {
-                        let label = b.label.as_deref().unwrap_or("");
-                        if label.is_empty() {
-                            lines.push(format!("  [{}] {}", b.id, b.command));
-                        } else {
-                            lines.push(format!("  [{}] {} — {}", b.id, b.command, label));
-                        }
-                    }
-                    lines
+                    _ => {}
                 }
-                Err(e) => vec![format!("❌ Error: {}", e)],
             }
-        } else {
-            match args[0].as_str() {
-                "add" => {
-                    if args.len() < 2 {
-                        return vec!["Usage: !bm add <command> [-- label]".to_string()];
-                    }
-                    let rest = args[1..].join(" ");
-                    let (cmd, label) = if let Some(idx) = rest.find(" -- ") {
-                        (&rest[..idx], Some(rest[idx + 4..].trim()))
-                    } else {
-                        (rest.as_str(), None)
-                    };
-                    match self.vault.add_bookmark(cmd, label) {
-                        Ok(id) => vec![format!("✅ Bookmarked as #{}: {}", id, cmd)],
-                        Err(e) => vec![format!("❌ Error: {}", e)],
-                    }
-                }
-                "rm" | "remove" | "del" | "delete" => {
-                    if args.len() < 2 {
-                        return vec!["Usage: !bm rm <id>".to_string()];
-                    }
-                    match args[1].parse::<i64>() {
-                        Ok(id) => match self.vault.remove_bookmark(id) {
-                            Ok(true) => vec![format!("✅ Bookmark #{} removed.", id)],
-                            Ok(false) => vec![format!("❓ Bookmark #{} not found.", id)],
-                            Err(e) => vec![format!("❌ Error: {}", e)],
-                        },
-                        Err(_) => vec!["❌ ID must be a number.".to_string()],
-                    }
-                }
-                _ => vec![
-                    "Usage: !bm [add <cmd> [-- label] | rm <id>]".to_string(),
-                    "  !bm / !bookmark       List bookmarks".to_string(),
-                    "  !bm add git log --oneline -- Quick log".to_string(),
-                    "  !bm rm 3".to_string(),
-                ],
+        }
+
+        if let Some((corrected_cmd, dist)) = best_match {
+            let max_len = first_word.len().max(corrected_cmd.len()) as f64;
+            let confidence = 1.0 - (dist as f64 / max_len);
+
+            return Some(Suggestion {
+                corrected: format!("{}{}", corrected_cmd, rest),
+                confidence,
+                source: SuggestionSource::Levenshtein,
+            });
+        }
+
+        None
+    }
+
+    /// Detect if the input is a character transposition of a known command.
+    fn detect_transposition(&self, word: &str) -> Option<&'static str> {
+        let chars: Vec<char> = word.chars().collect();
+        if chars.len() < 2 {
+            return None;
+        }
+
+        for cmd in common_commands() {
+            let cmd_chars: Vec<char> = cmd.chars().collect();
+            if chars.len() != cmd_chars.len() {
+                continue;
+            }
+
+            let diffs: Vec<usize> = chars
+                .iter()
+                .zip(cmd_chars.iter())
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(i, _)| i)
+                .collect();
+
+            if diffs.len() == 2
+                && diffs[1] - diffs[0] == 1
+                && chars[diffs[0]] == cmd_chars[diffs[1]]
+                && chars[diffs[1]] == cmd_chars[diffs[0]]
+            {
+                return Some(cmd);
             }
         }
-    }
 
-    fn cmd_stats(&self) -> Vec<String> {
-        match self.vault.stats() {
-            Ok(s) => {
-                let uptime = Utc::now().timestamp() - self.vault.start_time();
-                let uptime_str = format_duration(uptime);
-
-                let db_size = if s.db_size_bytes > 1_048_576 {
-                    format!("{:.1} MB", s.db_size_bytes as f64 / 1_048_576.0)
-                } else {
-                    format!("{:.1} KB", s.db_size_bytes as f64 / 1024.0)
-                };
-
-                let history_span = s.earliest_timestamp
-                    .map(|ts| {
-                        let days = (Utc::now().timestamp() - ts) / 86400;
-                        if days == 0 {
-                            "today".to_string()
-                        } else {
-                            format!("{} day(s)", days)
-                        }
-                    })
-                    .unwrap_or_else(|| "—".to_string());
-
-                vec![
-                    "📊 Vault Statistics".to_string(),
-                    "  ─────────────────────────────────────────────".to_string(),
-                    format!("  Session:        {} ({})", &self.vault.session_id()[..8], uptime_str),
-                    format!("  Commands (now):  {}", s.session_commands),
-                    format!("  Commands (all):  {} ({} unique)", s.total_commands, s.unique_commands),
-                    format!("  Sessions:        {}", s.total_sessions),
-                    format!("  Aliases:         {}", s.alias_count),
-                    format!("  Bookmarks:       {}", s.bookmark_count),
-                    format!("  History span:    {}", history_span),
-                    format!("  Database:        {}", db_size),
-                ]
-            }
-            Err(e) => vec![format!("❌ Stats error: {}", e)],
-        }
-    }
-
-    fn cmd_export(&self, args: &[String]) -> Vec<String> {
-        let limit: usize = args.first()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1000);
-
-        match self.vault.export_history(limit) {
-            Ok(lines) => {
-                if lines.is_empty() {
-                    return vec!["📤 No history to export.".to_string()];
-                }
-                let mut output = vec![format!("📤 Exported {} entries (shell history format):", lines.len())];
-                output.push("─────────────────────────────────────────────".to_string());
-                for line in &lines {
-                    output.push(line.clone());
-                }
-                output.push("─────────────────────────────────────────────".to_string());
-                output.push("  Tip: Copy and paste into ~/.bash_history or similar.".to_string());
-                output
-            }
-            Err(e) => vec![format!("❌ Export error: {}", e)],
-        }
-    }
-
-    fn cmd_fix(&self, args: &[String]) -> Vec<String> {
-        let input = args.join(" ");
-        if input.is_empty() {
-            return vec![
-                "Usage: !fix <command>".to_string(),
-                "  Example: !fix gti status".to_string(),
-            ];
-        }
-        match self.reflex.fix_command(&input) {
-            Some(s) => vec![
-                format!("💡 Suggestion: {}", s.corrected),
-                format!("   Confidence: {:.0}%  Source: {:?}", s.confidence * 100.0, s.source),
-            ],
-            None => vec![format!("✅ No correction needed for: {}", input)],
-        }
-    }
-
-    fn cmd_set(&self, args: &[String]) -> Vec<String> {
-        if args.len() < 2 {
-            return vec!["Usage: !set <key> <value>".to_string()];
-        }
-        let key = &args[0];
-        let value = args[1..].join(" ");
-        match self.vault.set_config(key, &value) {
-            Ok(()) => vec![format!("✅ Set {} = {}", key, value)],
-            Err(e) => vec![format!("❌ Error: {}", e)],
-        }
-    }
-
-    fn cmd_get(&self, args: &[String]) -> Vec<String> {
-        if args.is_empty() {
-            return vec!["Usage: !get <key>".to_string()];
-        }
-        match self.vault.get_config(&args[0]) {
-            Ok(Some(val)) => vec![format!("  {} = {}", args[0], val)],
-            Ok(None) => vec![format!("  {} is not set.", args[0])],
-            Err(e) => vec![format!("❌ Error: {}", e)],
-        }
+        None
     }
 }
 
-// ════════════════════════════════════════════════════════════════════
-// Formatting helpers
-// ════════════════════════════════════════════════════════════════════
-
-fn format_timestamp(ts: i64) -> String {
-    Utc.timestamp_opt(ts, 0)
-        .single()
-        .map(|dt| dt.format("%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "??".into())
-}
-
-fn format_duration(secs: i64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+impl Default for ReflexEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-fn short_path(path: &str) -> String {
-    if path.len() > 30 {
-        format!("…{}", &path[path.len() - 28..])
-    } else {
-        path.to_string()
+/// Compute the Levenshtein edit distance between two strings.
+pub fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 {
+        return b_len;
     }
+    if b_len == 0 {
+        return a_len;
+    }
+
+    let mut prev_row: Vec<usize> = (0..=b_len).collect();
+    let mut curr_row: Vec<usize> = vec![0; b_len + 1];
+
+    for i in 1..=a_len {
+        curr_row[0] = i;
+        for j in 1..=b_len {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr_row[j] = (prev_row[j] + 1)
+                .min(curr_row[j - 1] + 1)
+                .min(prev_row[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    prev_row[b_len]
 }

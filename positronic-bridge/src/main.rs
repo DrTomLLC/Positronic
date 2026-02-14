@@ -2,7 +2,7 @@ use iced::futures::SinkExt;
 use iced::widget::{column, container, rich_text, row, scrollable, span, text, text_input};
 use iced::{event, keyboard, Color, Element, Font, Length, Settings, Subscription, Task, Theme};
 
-use positronic_core::runner::ExecuteResult;
+use positronic_core::engine::ExecuteResult;
 use positronic_core::state_machine::Snapshot;
 use positronic_core::PositronicEngine;
 
@@ -202,7 +202,7 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
             // Hydrate persistent history from the Vault
             match engine.runner.vault().recent_unique(100) {
                 Ok(history) => {
-                    app.cmd_history = history.into_iter().rev().collect();
+                    app.cmd_history = history.into_iter().rev().collect::<Vec<String>>();
                     eprintln!("[UI] Hydrated {} commands from Vault.", app.cmd_history.len());
                 }
                 Err(e) => eprintln!("[UI] Failed to load history: {}", e),
@@ -236,14 +236,33 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
                 let snapshot = engine.state.snapshot();
                 let new_hash = hash_snapshot(&snapshot);
 
+                eprintln!("[DEBUG] Redraw triggered. Rows: {}, Cols: {}, Hash: {}",
+                          snapshot.rows(), snapshot.cols(), new_hash);
+
                 if new_hash != app.last_screen_hash {
                     app.last_screen_hash = new_hash;
+
+                    // Debug: print first few rows
+                    for row_idx in 0..snapshot.rows().min(5) {
+                        let row = &snapshot[row_idx];
+                        let line: String = row.iter().map(|(c, _)| *c).collect();
+                        eprintln!("[DEBUG] Row {}: '{}'", row_idx, line.trim_end());
+                    }
 
                     // ── CWD tracking: parse the last non-empty line for prompt patterns ──
                     update_cwd_from_snapshot(&snapshot, &mut app.cwd);
 
                     app.last_snapshot = Some(snapshot);
+
+                    // Clear direct_output once PTY is active
+                    if !app.direct_output.is_empty() && app.direct_output.starts_with("⚡") {
+                        app.direct_output.clear();
+                    }
+                } else {
+                    eprintln!("[DEBUG] Snapshot unchanged, skipping update");
                 }
+            } else {
+                eprintln!("[DEBUG] No engine available for redraw");
             }
             Task::none()
         }
@@ -266,7 +285,7 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
             app.tab_state = None;
             app.session_cmd_count += 1;
 
-            push_direct(app, &format!("➜ {}", trimmed));
+            // DON'T echo commands - the PTY will show them
             app.input.clear();
 
             // ── CWD tracking: detect cd commands ──
@@ -305,11 +324,10 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            // Log to vault
-            let _ = engine.runner.vault().log_command(&trimmed, None, None, &app.cwd, None);
+            eprintln!("[DEBUG] Sending command to engine: '{}'", trimmed);
 
             Task::perform(
-                async move { engine.send_input(&format!("{}\n", trimmed)).await },
+                async move { engine.send_input(&trimmed).await },
                 move |r| match r {
                     Ok(result) => Message::CommandResult(result),
                     Err(e) => Message::CommandError(format!("{:#}", e)),
@@ -318,8 +336,11 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
         }
 
         Message::CommandResult(result) => {
+            eprintln!("[DEBUG] CommandResult: {:?}", result);
             match result {
-                ExecuteResult::SentToPty => {}
+                ExecuteResult::SentToPty => {
+                    eprintln!("[DEBUG] Command sent to PTY, waiting for output...");
+                }
                 ExecuteResult::DirectOutput(lines) => {
                     push_direct(app, &lines.join("\n"));
                 }
@@ -374,7 +395,7 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
             app.direct_output.clear();
             app.last_snapshot = None;
             Task::perform(
-                async move { engine.send_input("cls\n").await },
+                async move { engine.send_input("cls").await },
                 |r| match r {
                     Ok(_) => Message::Redraw,
                     Err(e) => Message::CommandError(format!("{:#}", e)),
@@ -384,15 +405,12 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
 
         Message::CopyToClipboard => {
             // Build the full plain-text content for clipboard
-            let mut clipboard_text = app.direct_output.clone();
+            let mut clipboard_text = String::new();
+
             if let Some(ref snapshot) = app.last_snapshot {
-                let pty_text = renderer::snapshot_to_plain(snapshot);
-                if !pty_text.is_empty() {
-                    if !clipboard_text.is_empty() && !clipboard_text.ends_with('\n') {
-                        clipboard_text.push('\n');
-                    }
-                    clipboard_text.push_str(&pty_text);
-                }
+                clipboard_text = renderer::snapshot_to_plain(snapshot);
+            } else if !app.direct_output.is_empty() {
+                clipboard_text = app.direct_output.clone();
             }
 
             // Copy to system clipboard
@@ -472,7 +490,7 @@ fn get_alias_names(app: &PositronicApp) -> Vec<String> {
         return vec![];
     };
     match engine.runner.vault().list_aliases() {
-        Ok(aliases) => aliases.into_iter().map(|alias| alias.name).collect(),
+        Ok(aliases) => aliases.into_iter().map(|alias| alias.name).collect::<Vec<String>>(),
         Err(_) => vec![],
     }
 }
@@ -632,21 +650,16 @@ fn view(app: &PositronicApp) -> Element<'_, Message> {
     }
 
     // ── Colored output area ──
-    // Build spans from direct output + PTY snapshot
     let mut all_spans: Vec<iced::widget::text::Span<'static>> = Vec::new();
 
-    // Direct output (! command results, echoed commands)
-    if !app.direct_output.is_empty() {
-        all_spans.extend(renderer::direct_to_spans(&app.direct_output));
-    }
-
-    // PTY snapshot (colored terminal output from the shell)
+    // Show PTY snapshot (the REAL terminal state)
     if let Some(ref snapshot) = app.last_snapshot {
-        // Separator between direct output and PTY
-        if !app.direct_output.is_empty() {
-            all_spans.push(span("\n"));
-        }
         all_spans.extend(renderer::snapshot_to_spans(snapshot, app.theme_name));
+    }
+    // Show direct output ONLY if there's no PTY snapshot yet (during boot)
+    // OR if it's fresh built-in command output (like !help, !stats)
+    else if !app.direct_output.is_empty() {
+        all_spans.extend(renderer::direct_to_spans(&app.direct_output));
     }
 
     // If no spans at all, show a placeholder
@@ -660,7 +673,7 @@ fn view(app: &PositronicApp) -> Element<'_, Message> {
         .font(Font::MONOSPACE)
         .size(14);
 
-    // FIX: Use .anchor_bottom() instead of snap_to/Id which don't exist in iced 0.14
+    // Use .anchor_bottom() to auto-scroll to bottom
     let scrollable_output = scrollable(
         container(terminal_display)
             .padding([5, 10])
@@ -751,8 +764,14 @@ fn redraw_worker(
                     guard.recv().await
                 };
                 match next {
-                    Some(()) => { let _ = output.send(Message::Redraw).await; }
-                    None => break,
+                    Some(()) => {
+                        eprintln!("[DEBUG] Redraw worker sending Redraw message");
+                        let _ = output.send(Message::Redraw).await;
+                    }
+                    None => {
+                        eprintln!("[DEBUG] Redraw worker channel closed");
+                        break;
+                    }
                 }
             }
         },

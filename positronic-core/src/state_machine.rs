@@ -6,7 +6,9 @@ use alacritty_terminal::vte::ansi;
 use std::ops::Index;
 use std::sync::{Arc, Mutex};
 
-// --- Helper Types for Dimensions ---
+// ════════════════════════════════════════════════════════════════════
+// Helper Types for Dimensions
+// ════════════════════════════════════════════════════════════════════
 
 #[derive(Clone, Copy, Debug)]
 struct TermSize {
@@ -16,7 +18,9 @@ struct TermSize {
 
 impl Dimensions for TermSize {
     fn total_lines(&self) -> usize {
-        self.rows
+        // IMPORTANT: Add scrollback history!
+        // Without this, the terminal wraps around and overwrites itself.
+        self.rows + 2000
     }
 
     fn screen_lines(&self) -> usize {
@@ -28,7 +32,9 @@ impl Dimensions for TermSize {
     }
 }
 
-// --- Event Proxy (Required Stub) ---
+// ════════════════════════════════════════════════════════════════════
+// Event Proxy (Required Stub)
+// ════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
 pub struct EventProxy;
@@ -39,7 +45,9 @@ impl EventListener for EventProxy {
     }
 }
 
-// --- Color Handling ---
+// ════════════════════════════════════════════════════════════════════
+// Color Handling
+// ════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MyColor {
@@ -109,7 +117,9 @@ impl MyColor {
     }
 }
 
-// --- Snapshot (flat storage, 2D semantics for tests) ---
+// ════════════════════════════════════════════════════════════════════
+// Snapshot (flat storage, 2D semantics for tests)
+// ════════════════════════════════════════════════════════════════════
 
 pub type SnapshotCell = (char, MyColor);
 
@@ -213,7 +223,9 @@ impl<'a> IntoIterator for &'a Snapshot {
     }
 }
 
-// --- The State Machine ---
+// ════════════════════════════════════════════════════════════════════
+// The State Machine
+// ════════════════════════════════════════════════════════════════════
 
 struct Inner {
     term: Term<EventProxy>,
@@ -243,6 +255,8 @@ impl StateMachine {
         let term = Term::new(config, &size, EventProxy);
         let parser = ansi::Processor::new();
 
+        eprintln!("[STATE_MACHINE] Created with {} cols x {} rows", cols, rows);
+
         Self {
             inner: Arc::new(Mutex::new(Inner { term, parser })),
         }
@@ -263,17 +277,31 @@ impl StateMachine {
             return;
         }
 
+        // Debug: Show what we're processing
+        let preview = if bytes.len() <= 100 {
+            String::from_utf8_lossy(bytes).to_string()
+        } else {
+            format!("{}... ({} more bytes)",
+                    String::from_utf8_lossy(&bytes[..100]),
+                    bytes.len() - 100)
+        };
+        eprintln!("[STATE_MACHINE] Processing {} bytes: '{}'", bytes.len(), preview);
+
         let mut inner = self.lock_inner();
 
         // Split the mutable borrow safely.
         let Inner { term, parser } = &mut *inner;
 
-        /*for &byte in bytes {
-            parser.advance(term, byte);
-        }*/
-        for &byte in bytes.iter() {
-            parser.advance(term, &[byte]);
+        // Process all bytes at once - the parser handles buffering internally
+        parser.advance(term, bytes);
+
+        // Debug: Show terminal state after processing
+        let grid = term.grid();
+        let mut content_preview = String::new();
+        for indexed in grid.display_iter().take(80) {
+            content_preview.push(indexed.cell.c);
         }
+        eprintln!("[STATE_MACHINE] Terminal content (first 80 chars): '{}'", content_preview.trim());
     }
 
     /// Allocate a fresh snapshot.
@@ -296,10 +324,12 @@ impl StateMachine {
 
         let grid = inner.term.grid();
 
+        // IMPORTANT: We must use `display_iter()` which accounts for scrollback and viewport
         for indexed in grid.display_iter() {
             let col = indexed.point.column.0;
 
             // IMPORTANT: Line is often i32. Guard negatives.
+            // Also, `display_iter` returns lines relative to the visible screen.
             let line_i32 = indexed.point.line.0;
             if line_i32 < 0 {
                 continue;
@@ -318,6 +348,8 @@ impl StateMachine {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
+        eprintln!("[STATE_MACHINE] Resizing to {} cols x {} rows", cols, rows);
+
         let mut inner = self.lock_inner();
 
         let size = TermSize {
@@ -326,5 +358,88 @@ impl StateMachine {
         };
 
         inner.term.resize(size);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Tests
+// ════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_machine_new() {
+        let sm = StateMachine::new(80, 24);
+        let snap = sm.snapshot();
+        assert_eq!(snap.rows(), 24);
+        assert_eq!(snap.cols(), 80);
+    }
+
+    #[test]
+    fn test_process_simple_text() {
+        let sm = StateMachine::new(80, 24);
+        sm.process_bytes(b"Hello, World!");
+        let snap = sm.snapshot();
+
+        // First row should contain "Hello, World!"
+        let row0: String = snap[0].iter().map(|(c, _)| *c).collect();
+        assert!(row0.starts_with("Hello, World!"));
+    }
+
+    #[test]
+    fn test_process_ansi_colors() {
+        let sm = StateMachine::new(80, 24);
+        // Red text: ESC[31m
+        sm.process_bytes(b"\x1b[31mRED\x1b[0m");
+        let snap = sm.snapshot();
+
+        // Check that we got some content
+        let row0: String = snap[0].iter().map(|(c, _)| *c).collect();
+        assert!(row0.contains('R'));
+    }
+
+    #[test]
+    fn test_resize() {
+        let sm = StateMachine::new(80, 24);
+        sm.process_bytes(b"Test");
+
+        sm.resize(100, 30);
+        let snap = sm.snapshot();
+        assert_eq!(snap.rows(), 30);
+        assert_eq!(snap.cols(), 100);
+    }
+
+    #[test]
+    fn test_snapshot_iteration() {
+        let sm = StateMachine::new(10, 5);
+        sm.process_bytes(b"Line1\nLine2\nLine3");
+
+        let snap = sm.snapshot();
+        let mut count = 0;
+        for _row in &snap {
+            count += 1;
+        }
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn test_empty_snapshot() {
+        let snap = Snapshot::new(0, 0);
+        assert!(snap.is_empty());
+        assert_eq!(snap.len(), 0);
+    }
+
+    #[test]
+    fn test_color_conversion() {
+        let red = MyColor::from_alacritty(ansi::Color::Named(ansi::NamedColor::Red));
+        assert_eq!(red, MyColor::Red);
+
+        let rgb = MyColor::from_alacritty(ansi::Color::Spec(ansi::Rgb { r: 255, g: 128, b: 0 }));
+        assert_eq!(rgb, MyColor::Rgb(255, 128, 0));
+
+        let indexed = MyColor::from_alacritty(ansi::Color::Indexed(42));
+        assert_eq!(indexed, MyColor::Indexed(42));
     }
 }

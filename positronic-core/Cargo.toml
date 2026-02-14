@@ -1,7 +1,7 @@
 [package]
 name = "positronic-core"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 authors = ["Doctor Tom"]
 description = "The high-stability state machine and PTY backend for the Positronic terminal environment."
 license = "MIT"
@@ -14,14 +14,11 @@ positronic-script = { path = "../positronic-script" }
 positronic-hive = { path = "../positronic-hive" }
 positronic-io = { path = "../positronic-io" }
 
-# --- The Terminal Backend ---
+# --- The Terminal Backend (VT parser and state machine) ---
 alacritty_terminal = "0.25.1"
 
-# --- PTY Management ---
-portable-pty = "0.9.0"
-
 # --- Async Runtime ---
-tokio = { version = "1.49.0", features = ["sync", "io-util", "rt"] }
+tokio = { version = "1.49.0", features = ["sync", "io-util", "rt", "process", "io-std"] }
 
 # --- Data Handling ---
 serde = { version = "1.0.228", features = ["derive"] }
@@ -45,7 +42,23 @@ chrono = { version = "0.4.43", features = ["serde"] }
 
 # --- Filesystem Watching ---
 notify = "9.0.0-rc.1"
+nix = "0.31.1"
 
-# --- Cross-Platform Bits ---
+# ════════════════════════════════════════════════════════════════════
+# Platform-Specific PTY Implementation
+# ════════════════════════════════════════════════════════════════════
+
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["consoleapi", "handleapi"] }
+# Native Windows ConPTY support
+conpty = "0.5"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+# Native Unix PTY support
+nix = { version = "0.29", features = ["process", "term"] }
+libc = "0.2"
