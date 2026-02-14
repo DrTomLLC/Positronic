@@ -272,7 +272,7 @@ impl StateMachine {
             parser.advance(term, byte);
         }*/
         for &byte in bytes.iter() {
-            parser.advance(term, byte);
+            parser.advance(term, &[byte]);
         }
     }
 

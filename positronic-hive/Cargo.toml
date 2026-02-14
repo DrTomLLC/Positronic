@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 # --- Network Stack ---
 # (Placeholders for now)
-uuid = { version = "1.20.0", features = ["v4", "serde"] }
+uuid = { version = "1.21.0", features = ["v4", "serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 anyhow = "1.0.101"
 tracing = "0.1.44"

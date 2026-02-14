@@ -202,6 +202,18 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
     match message {
         Message::EngineReady(engine, redraw) => {
             eprintln!("[UI] ✅ Engine ready!");
+
+            // 🟢 HYDRATION: Load persistent history from the Vault
+            // We use engine.runner.vault() (the getter)
+            match engine.runner.vault().recent_unique(100) {
+                Ok(history) => {
+                    // Reverse so "Up" arrow goes to the most recent command first
+                    app.cmd_history = history.into_iter().rev().collect();
+                    eprintln!("[UI] Hydrated {} commands from Vault.", app.cmd_history.len());
+                }
+                Err(e) => eprintln!("[UI] ⚠️ Failed to load history: {}", e),
+            }
+
             app.engine = Some(engine);
             app.redraw = Some(redraw);
             app.state = AppState::Active;
@@ -243,6 +255,7 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
                 return Task::none();
             }
 
+            // Add to in-memory buffer for immediate recall
             app.cmd_history.push(trimmed.clone());
             app.history_cursor = None;
             app.session_cmd_count += 1;
@@ -254,6 +267,10 @@ fn update(app: &mut PositronicApp, message: Message) -> Task<Message> {
                 push_direct(app, "❌ Engine not ready.");
                 return Task::none();
             };
+
+            // 🟢 FORCE LOGGING: Ensure native commands like !stats are also saved.
+            // (The Runner only logs shell commands internally).
+            let _ = engine.runner.vault().log_command(&trimmed, None, None, ".", None);
 
             Task::perform(
                 async move { engine.send_input(&format!("{}\n", trimmed)).await },

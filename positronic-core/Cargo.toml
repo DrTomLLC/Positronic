@@ -15,32 +15,32 @@ positronic-hive = { path = "../positronic-hive" }
 positronic-io = { path = "../positronic-io" }
 
 # --- The Terminal Backend ---
-alacritty_terminal = "0.24"
+alacritty_terminal = "0.25.1"
 
 # --- PTY Management ---
-portable-pty = "0.8"
+portable-pty = "0.9.0"
 
 # --- Async Runtime ---
-tokio = { version = "1.36", features = ["sync", "io-util", "rt"] }
+tokio = { version = "1.49.0", features = ["sync", "io-util", "rt"] }
 
 # --- Data Handling ---
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 
 # --- Error Handling ---
-anyhow = "1.0"
-thiserror = "1.0"
+anyhow = "1.0.101"
+thiserror = "2.0.18"
 
 # --- Logging ---
-tracing = "0.1"
+tracing = "0.1.44"
 
 # --- Utilities ---
-bytes = "1.5"
-regex = "1.10"
+bytes = "1.11.1"
+regex = "1.12.3"
 
 # --- Persistence ---
 rusqlite = { version = "0.38.0", features = ["bundled"] }
-uuid = { version = "1.20.0", features = ["v4", "serde"] }
+uuid = { version = "1.21.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.43", features = ["serde"] }
 
 # --- Filesystem Watching ---
