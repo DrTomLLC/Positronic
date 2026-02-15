@@ -7,13 +7,15 @@
 // render blocks as collapsible cards with copy/search support.
 
 use chrono::{DateTime, Local};
+use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Unique identifier for a block.
 pub type BlockId = u64;
 
 /// A single terminal block representing one command execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalBlock {
     /// Monotonically increasing block ID.
     pub id: BlockId,
@@ -24,6 +26,7 @@ pub struct TerminalBlock {
     /// When the command was submitted.
     pub timestamp: DateTime<Local>,
     /// How long the command took (None if still running).
+    #[serde(with = "optional_duration_millis")]
     pub duration: Option<Duration>,
     /// Exit code from shell (None for native/neural commands).
     pub exit_code: Option<i32>,
@@ -37,15 +40,79 @@ pub struct TerminalBlock {
     pub running: bool,
 }
 
+impl TerminalBlock {
+    /// Number of output lines in this block.
+    pub fn line_count(&self) -> usize {
+        self.output.len()
+    }
+
+    /// Whether this block finished with a non-zero exit code.
+    pub fn failed(&self) -> bool {
+        self.exit_code.map(|c| c != 0).unwrap_or(false)
+    }
+
+    /// Whether this block finished successfully (exit code 0).
+    pub fn succeeded(&self) -> bool {
+        self.exit_code == Some(0)
+    }
+
+    /// Get a human-readable duration string.
+    pub fn duration_display(&self) -> String {
+        match self.duration {
+            Some(d) => format_duration(d),
+            None if self.running => "running…".to_string(),
+            None => "—".to_string(),
+        }
+    }
+
+    /// Count lines of a specific kind.
+    pub fn count_lines_of_kind(&self, kind: LineKind) -> usize {
+        self.output.iter().filter(|l| l.kind == kind).count()
+    }
+
+    /// Get only error lines from this block.
+    pub fn error_lines(&self) -> Vec<&BlockLine> {
+        self.output.iter().filter(|l| l.kind == LineKind::Error).collect()
+    }
+
+    /// Get only warning lines from this block.
+    pub fn warning_lines(&self) -> Vec<&BlockLine> {
+        self.output.iter().filter(|l| l.kind == LineKind::Warning).collect()
+    }
+}
+
+impl fmt::Display for TerminalBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let status = if self.running {
+            "⏳ running".to_string()
+        } else {
+            match self.exit_code {
+                Some(0) => "✅ ok".to_string(),
+                Some(code) => format!("❌ exit {}", code),
+                None => "—".to_string(),
+            }
+        };
+        write!(
+            f,
+            "[{}] {} ({}, {} lines, {})",
+            self.id,
+            self.command,
+            self.source,
+            self.output.len(),
+            status
+        )
+    }
+}
+
 /// A single line within a block, with optional semantic classification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockLine {
     pub text: String,
     pub kind: LineKind,
 }
 
 /// Semantic line classification for coloring/filtering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LineKind {
     /// Normal output text.
     Normal,
@@ -62,7 +129,7 @@ pub enum LineKind {
 }
 
 /// Where the block's output came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockSource {
     /// Output from a PTY shell command.
     Shell,
@@ -74,6 +141,36 @@ pub enum BlockSource {
     System,
 }
 
+impl fmt::Display for BlockSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlockSource::Shell => write!(f, "shell"),
+            BlockSource::Native => write!(f, "native"),
+            BlockSource::Neural => write!(f, "neural"),
+            BlockSource::System => write!(f, "system"),
+        }
+    }
+}
+
+impl fmt::Display for LineKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LineKind::Normal => write!(f, "normal"),
+            LineKind::Error => write!(f, "error"),
+            LineKind::Warning => write!(f, "warning"),
+            LineKind::Success => write!(f, "success"),
+            LineKind::Info => write!(f, "info"),
+            LineKind::Muted => write!(f, "muted"),
+        }
+    }
+}
+
+impl fmt::Display for BlockLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.text)
+    }
+}
+
 impl BlockLine {
     pub fn normal(text: impl Into<String>) -> Self {
         Self { text: text.into(), kind: LineKind::Normal }
@@ -81,6 +178,10 @@ impl BlockLine {
 
     pub fn error(text: impl Into<String>) -> Self {
         Self { text: text.into(), kind: LineKind::Error }
+    }
+
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self { text: text.into(), kind: LineKind::Warning }
     }
 
     pub fn info(text: impl Into<String>) -> Self {
@@ -91,11 +192,16 @@ impl BlockLine {
         Self { text: text.into(), kind: LineKind::Success }
     }
 
+    pub fn muted(text: impl Into<String>) -> Self {
+        Self { text: text.into(), kind: LineKind::Muted }
+    }
+
     /// Classify a line by its content (heuristic).
     pub fn classify(text: impl Into<String>) -> Self {
         let s: String = text.into();
         let trimmed = s.trim_start();
         let kind = if trimmed.starts_with("error") || trimmed.starts_with("Error")
+            || trimmed.starts_with("ERROR")
             || trimmed.starts_with("❌") || trimmed.starts_with("FAILED")
         {
             LineKind::Error
@@ -105,16 +211,23 @@ impl BlockLine {
             LineKind::Warning
         } else if trimmed.starts_with("✅") || trimmed.starts_with("ok ")
             || trimmed.starts_with("Compiling") || trimmed.starts_with("Finished")
+            || trimmed.starts_with("PASSED")
         {
             LineKind::Success
         } else if trimmed.starts_with("💡") || trimmed.starts_with("🧠")
             || trimmed.starts_with("📡") || trimmed.starts_with("🔌")
+            || trimmed.starts_with("INFO") || trimmed.starts_with("note:")
         {
             LineKind::Info
         } else {
             LineKind::Normal
         };
         Self { text: s, kind }
+    }
+
+    /// Whether this line is empty or whitespace-only.
+    pub fn is_blank(&self) -> bool {
+        self.text.trim().is_empty()
     }
 }
 
@@ -177,6 +290,13 @@ impl BlockManager {
         }
     }
 
+    /// Append a single line to a running block.
+    pub fn append_line(&mut self, block_id: BlockId, line: BlockLine) {
+        if let Some(block) = self.blocks.iter_mut().find(|b| b.id == block_id) {
+            block.output.push(line);
+        }
+    }
+
     /// Mark a block as finished with an optional exit code and duration.
     pub fn finish(&mut self, block_id: BlockId, exit_code: Option<i32>, duration: Duration) {
         if let Some(block) = self.blocks.iter_mut().find(|b| b.id == block_id) {
@@ -200,6 +320,13 @@ impl BlockManager {
         }
     }
 
+    /// Expand all blocks.
+    pub fn expand_all(&mut self) {
+        for block in &mut self.blocks {
+            block.collapsed = false;
+        }
+    }
+
     /// Get all blocks (for rendering).
     pub fn blocks(&self) -> &[TerminalBlock] {
         &self.blocks
@@ -210,9 +337,69 @@ impl BlockManager {
         self.blocks.last()
     }
 
+    /// Get a mutable reference to the most recent block.
+    pub fn latest_mut(&mut self) -> Option<&mut TerminalBlock> {
+        self.blocks.last_mut()
+    }
+
     /// Get a block by ID.
     pub fn get(&self, block_id: BlockId) -> Option<&TerminalBlock> {
         self.blocks.iter().find(|b| b.id == block_id)
+    }
+
+    /// Get a mutable block by ID.
+    pub fn get_mut(&mut self, block_id: BlockId) -> Option<&mut TerminalBlock> {
+        self.blocks.iter_mut().find(|b| b.id == block_id)
+    }
+
+    /// Remove a block by ID. Returns the removed block if found.
+    pub fn remove(&mut self, block_id: BlockId) -> Option<TerminalBlock> {
+        if let Some(pos) = self.blocks.iter().position(|b| b.id == block_id) {
+            Some(self.blocks.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Get the total number of blocks.
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Whether the block manager has no blocks.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// Filter blocks by source type.
+    pub fn filter_by_source(&self, source: BlockSource) -> Vec<&TerminalBlock> {
+        self.blocks.iter().filter(|b| b.source == source).collect()
+    }
+
+    /// Filter blocks by exit code. Matches only finished blocks.
+    pub fn filter_by_exit_code(&self, exit_code: i32) -> Vec<&TerminalBlock> {
+        self.blocks.iter()
+            .filter(|b| b.exit_code == Some(exit_code))
+            .collect()
+    }
+
+    /// Get all currently running blocks.
+    pub fn running_blocks(&self) -> Vec<&TerminalBlock> {
+        self.blocks.iter().filter(|b| b.running).collect()
+    }
+
+    /// Get all blocks that finished with a non-zero exit code.
+    pub fn failed_blocks(&self) -> Vec<&TerminalBlock> {
+        self.blocks.iter()
+            .filter(|b| b.failed())
+            .collect()
+    }
+
+    /// Get all blocks that finished successfully (exit code 0).
+    pub fn succeeded_blocks(&self) -> Vec<&TerminalBlock> {
+        self.blocks.iter()
+            .filter(|b| b.succeeded())
+            .collect()
     }
 
     /// Search all blocks for lines containing a query string.
@@ -258,8 +445,31 @@ impl BlockManager {
         })
     }
 
+    /// Export all blocks to a single text string (for saving/sharing).
+    pub fn export_all(&self) -> String {
+        let mut out = String::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\n────────────────────────────────────\n\n");
+            }
+            out.push_str(&format!("$ {} [{}] ({})\n", block.command, block.source, block.cwd));
+            for line in &block.output {
+                out.push_str(&line.text);
+                out.push('\n');
+            }
+            if let Some(code) = block.exit_code {
+                out.push_str(&format!("[exit {}]", code));
+            }
+            if let Some(d) = block.duration {
+                out.push_str(&format!(" [{}]", format_duration(d)));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     /// Total number of output lines across all blocks.
-    fn total_lines(&self) -> usize {
+    pub fn total_lines(&self) -> usize {
         self.blocks.iter().map(|b| b.output.len()).sum()
     }
 
@@ -297,7 +507,7 @@ impl BlockManager {
 }
 
 /// A search result hit within the block history.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub block_id: BlockId,
     pub line_index: Option<usize>,
@@ -305,12 +515,22 @@ pub struct SearchHit {
 }
 
 /// Summary statistics about blocks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockStats {
     pub total_blocks: usize,
     pub total_lines: usize,
     pub running: usize,
     pub errors: usize,
+}
+
+impl fmt::Display for BlockStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} blocks, {} lines, {} running, {} errors",
+            self.total_blocks, self.total_lines, self.running, self.errors
+        )
+    }
 }
 
 /// Helper to create a complete block for a native command in one shot.
@@ -330,6 +550,64 @@ pub fn quick_block(
     manager.finish(id, Some(0), start.elapsed());
     id
 }
+
+/// Helper to create a failed block in one shot.
+pub fn quick_error_block(
+    manager: &mut BlockManager,
+    command: &str,
+    cwd: &str,
+    error_msg: &str,
+    exit_code: i32,
+) -> BlockId {
+    let start = Instant::now();
+    let id = manager.begin(command, cwd, BlockSource::Shell);
+    manager.append(id, vec![BlockLine::error(error_msg)]);
+    manager.finish(id, Some(exit_code), start.elapsed());
+    id
+}
+
+/// Format a Duration into a human-readable string.
+pub fn format_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let millis = d.subsec_millis();
+
+    if total_secs == 0 {
+        format!("{}ms", millis)
+    } else if total_secs < 60 {
+        format!("{}.{:03}s", total_secs, millis)
+    } else if total_secs < 3600 {
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        format!("{}m {:02}s", mins, secs)
+    } else {
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        format!("{}h {:02}m", hours, mins)
+    }
+}
+
+/// Serde helper for optional Duration stored as milliseconds.
+mod optional_duration_millis {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(dur: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+        match dur {
+            Some(d) => d.as_millis().serialize(s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        let opt: Option<u128> = Option::deserialize(d)?;
+        Ok(opt.map(|ms| Duration::from_millis(ms as u64)))
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// Unit Tests (inline)
+// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -376,7 +654,7 @@ mod tests {
         for i in 0..5 {
             mgr.begin(&format!("cmd {}", i), ".", BlockSource::Shell);
         }
-        assert_eq!(mgr.blocks().len(), 3); // oldest 2 pruned
+        assert_eq!(mgr.blocks().len(), 3);
     }
 
     #[test]

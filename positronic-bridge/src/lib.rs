@@ -3,4 +3,4 @@ pub mod hardware;
 pub mod holodeck;
 pub mod input;
 mod renderer;
-mod block;
+pub mod block;
