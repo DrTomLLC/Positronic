@@ -1,29 +1,19 @@
-//! Positronic Bridge — the iced GUI shell.
+//! Positronic Bridge — the winit/wgpu GPU shell.
 //!
 //! The binary entry point. All logic lives in the library target.
+//! This replaces the old iced::application() entry point.
 
-use positronic_bridge::app::boot;
-use positronic_bridge::keyboard::subscription;
-use positronic_bridge::update::update;
-use positronic_bridge::view_ui::{title, theme, view};
+use positronic_bridge::shell;
+use positronic_bridge::util;
 
-use iced::Settings;
+fn main() {
+    util::init_tracing();
+    util::install_panic_hook();
 
-pub fn main() -> iced::Result {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(std::io::stderr)
-        .init();
+    tracing::info!("=== Positronic v0.3.0 Starting ===");
 
-    eprintln!("=== Positronic Starting ===");
-
-    iced::application(boot, update, view)
-        .title(title)
-        .theme(theme)
-        .subscription(subscription)
-        .settings(Settings {
-            antialiasing: true,
-            ..Settings::default()
-        })
-        .run()
+    if let Err(e) = shell::run() {
+        tracing::error!("Fatal: {:#}", e);
+        std::process::exit(1);
+    }
 }

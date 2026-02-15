@@ -1,7 +1,9 @@
 //! Shared utility functions.
+//!
+//! Zero UI dependencies. Used by both shell and ui modules.
 
-use crate::app::PositronicApp;
 use positronic_core::state_machine::Snapshot;
+use positronic_core::PositronicEngine;
 
 use std::hash::{Hash, Hasher};
 
@@ -39,7 +41,6 @@ pub fn format_duration_short(secs: i64) -> String {
 }
 
 /// Shorten a path for status bar display.
-/// "C:\Users\Doctor\Projects\positronic" → "~\Projects\positronic"
 pub fn short_path(path: &str) -> String {
     if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
         if let Some(rest) = path.strip_prefix(&home) {
@@ -53,16 +54,17 @@ pub fn short_path(path: &str) -> String {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Alias helper
+// Alias helpers
 // ────────────────────────────────────────────────────────────────
 
 /// Retrieve alias names from the vault (for tab completion).
-pub fn get_alias_names(app: &PositronicApp) -> Vec<String> {
-    let Some(engine) = &app.engine else {
+/// Takes an optional engine reference — no UI dependency.
+pub fn get_alias_names_from(engine: Option<&PositronicEngine>) -> Vec<String> {
+    let Some(engine) = engine else {
         return vec![];
     };
     match engine.runner.vault().list_aliases() {
-        Ok(aliases) => aliases.into_iter().map(|alias| alias.name).collect::<Vec<String>>(),
+        Ok(aliases) => aliases.into_iter().map(|a| a.name).collect(),
         Err(_) => vec![],
     }
 }
