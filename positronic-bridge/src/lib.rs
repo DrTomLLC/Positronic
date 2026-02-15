@@ -24,3 +24,8 @@ pub mod view_ui;
 // ── Unchanged modules (copy from existing project) ───────────────
 pub mod completer;
 pub mod renderer;
+mod platform;
+mod gfx;
+mod ui;
+mod shell;
+mod util;
