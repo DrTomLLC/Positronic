@@ -1,9 +1,15 @@
+// positronic-bridge/tests/mod.rs
+//
+// Integration tests for BioLink (Pillar III accessibility),
+// Hardware status panel, and InputEditor basics.
+// The deep InputEditor tests live in input_tests.rs.
+
 use positronic_bridge::biolink::{AccessibilityConfig, BioLink, BioLinkEvent};
 use positronic_bridge::hardware::{DeviceStatus, HardwarePanel, SensorStats, WaveformBuffer};
 use positronic_bridge::input::InputEditor;
 
 // ============================================================================
-// BioLink - AccessibilityConfig Tests
+// BioLink — AccessibilityConfig
 // ============================================================================
 
 #[test]
@@ -32,7 +38,7 @@ fn test_accessibility_config_clone() {
 }
 
 // ============================================================================
-// BioLink - BioLinkEvent Tests
+// BioLink — BioLinkEvent
 // ============================================================================
 
 #[test]
@@ -96,7 +102,7 @@ fn test_biolink_event_clone_eq() {
 }
 
 // ============================================================================
-// BioLink - Controller Tests
+// BioLink — Controller
 // ============================================================================
 
 #[test]
@@ -115,15 +121,25 @@ fn test_biolink_default() {
 #[test]
 fn test_biolink_announce_disabled() {
     let mut biolink = BioLink::new();
-    // Both screen_reader and tts are disabled by default
     biolink.announce(BioLinkEvent::Announcement("test".to_string()));
     assert_eq!(biolink.pending_count(), 0);
 }
 
 #[test]
-fn test_biolink_announce_enabled() {
+fn test_biolink_announce_screen_reader_enabled() {
     let config = AccessibilityConfig {
         screen_reader_enabled: true,
+        ..Default::default()
+    };
+    let mut biolink = BioLink::with_config(config);
+    biolink.announce(BioLinkEvent::Announcement("hello".to_string()));
+    assert_eq!(biolink.pending_count(), 1);
+}
+
+#[test]
+fn test_biolink_announce_tts_enabled() {
+    let config = AccessibilityConfig {
+        tts_enabled: true,
         ..Default::default()
     };
     let mut biolink = BioLink::with_config(config);
@@ -198,7 +214,7 @@ fn test_biolink_describe_input_with_content() {
 }
 
 // ============================================================================
-// Hardware - SensorStats Tests
+// Hardware — SensorStats
 // ============================================================================
 
 #[test]
@@ -255,7 +271,7 @@ fn test_sensor_stats_negative_values() {
 }
 
 // ============================================================================
-// Hardware - WaveformBuffer Tests
+// Hardware — WaveformBuffer
 // ============================================================================
 
 #[test]
@@ -295,11 +311,10 @@ fn test_waveform_buffer_wraparound() {
     buf.push(0.0, 1.0);
     buf.push(1.0, 2.0);
     buf.push(2.0, 3.0);
-    buf.push(3.0, 4.0); // Overwrites first
+    buf.push(3.0, 4.0); // overwrites first
 
     assert_eq!(buf.len(), 3);
     let samples = buf.samples();
-    // Should be [2.0, 3.0, 4.0] in chronological order
     assert!((samples[0].1 - 2.0).abs() < f32::EPSILON);
     assert!((samples[1].1 - 3.0).abs() < f32::EPSILON);
     assert!((samples[2].1 - 4.0).abs() < f32::EPSILON);
@@ -329,7 +344,7 @@ fn test_waveform_buffer_full_cycle() {
 }
 
 // ============================================================================
-// Hardware - HardwarePanel Tests
+// Hardware — HardwarePanel
 // ============================================================================
 
 #[test]
@@ -424,7 +439,7 @@ fn test_hardware_panel_multiple_connections() {
 }
 
 // ============================================================================
-// InputEditor Tests
+// InputEditor — Basics (deep tests in input_tests.rs)
 // ============================================================================
 
 #[test]

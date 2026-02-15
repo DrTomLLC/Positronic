@@ -1,5 +1,13 @@
+//! Positronic Engine — the core coordinator.
+//!
+//! Owns the PTY, state machine, runner, airlock and all subsystem handles.
+//! After the pager-trap bugfix, this module also exposes low-level PTY
+//! control signals (`send_interrupt`, `send_escape`, `send_eof`, `send_raw`)
+//! so the UI can break out of pagers and continuation prompts.
+
 use crate::airlock::Airlock;
 use crate::pty_manager::PtyManager;
+use crate::runner::Runner;
 use crate::state_machine::StateMachine;
 use crate::vault::Vault;
 
@@ -12,384 +20,8 @@ use positronic_script::wasm_host::WasmHost;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
-#[derive(Debug, Clone)]
-pub enum ExecuteResult {
-    SentToPty,
-    DirectOutput(Vec<String>),
-    ClearScreen,
-}
-
-#[derive(Debug)]
-pub struct Runner {
-    pty: Arc<Mutex<PtyManager>>,
-    airlock: Arc<Airlock>,
-    neural: Arc<NeuralClient>,
-    vault: Vault,
-    wasm_host: Arc<WasmHost>,
-    hive: Arc<HiveNode>,
-    io: Arc<HardwareMonitor>,
-}
-
-impl Runner {
-    pub fn new(
-        pty: Arc<Mutex<PtyManager>>,
-        airlock: Arc<Airlock>,
-        neural: Arc<NeuralClient>,
-        vault: Vault,
-        wasm_host: Arc<WasmHost>,
-        hive: Arc<HiveNode>,
-        io: Arc<HardwareMonitor>,
-    ) -> Self {
-        Self {
-            pty,
-            airlock,
-            neural,
-            vault,
-            wasm_host,
-            hive,
-            io,
-        }
-    }
-
-    pub fn vault(&self) -> &Vault {
-        &self.vault
-    }
-
-    pub async fn execute(&self, data: &str) -> Result<ExecuteResult> {
-        let trimmed = data.trim();
-
-        if trimmed.is_empty() {
-            return Ok(ExecuteResult::SentToPty);
-        }
-
-        if trimmed.starts_with('!') {
-            return self.handle_builtin(trimmed).await;
-        }
-
-        let final_command = if let Some(expanded) = self.expand_alias(trimmed) {
-            expanded
-        } else {
-            trimmed.to_string()
-        };
-
-        let mut pty = self.pty.lock().await;
-        pty.write_line(&final_command)?;
-
-        Ok(ExecuteResult::SentToPty)
-    }
-
-    fn expand_alias(&self, cmd: &str) -> Option<String> {
-        let first_word = cmd.split_whitespace().next()?;
-
-        if let Ok(Some(expansion)) = self.vault.get_alias(first_word) {
-            let rest = cmd.strip_prefix(first_word).unwrap_or("");
-            Some(format!("{}{}", expansion, rest))
-        } else {
-            None
-        }
-    }
-
-    async fn handle_builtin(&self, cmd: &str) -> Result<ExecuteResult> {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let command = parts[0];
-
-        match command {
-            "!clear" | "!cls" => Ok(ExecuteResult::ClearScreen),
-
-            "!help" => {
-                let help_text = vec![
-                    "╔══════════════════════════════════════════════════════════╗".to_string(),
-                    "║          Positronic Built-in Commands                   ║".to_string(),
-                    "╚══════════════════════════════════════════════════════════╝".to_string(),
-                    "".to_string(),
-                    "  !help              Show this help".to_string(),
-                    "  !clear, !cls       Clear the screen".to_string(),
-                    "  !history [n]       Show last n commands (default: 20)".to_string(),
-                    "  !search <query>    Search command history".to_string(),
-                    "  !stats             Show vault statistics".to_string(),
-                    "  !top [n]           Show most-used commands (default: 10)".to_string(),
-                    "".to_string(),
-                    "  !alias             List all aliases".to_string(),
-                    "  !alias <name> <expansion>  Create/update alias".to_string(),
-                    "  !unalias <name>    Remove an alias".to_string(),
-                    "".to_string(),
-                    "  !bookmark [label]  Bookmark last command".to_string(),
-                    "  !bookmarks         List all bookmarks".to_string(),
-                    "".to_string(),
-                    "  !theme <name>      Change color theme (handled by UI)".to_string(),
-                    "  !pwd               Show current directory (handled by UI)".to_string(),
-                    "".to_string(),
-                    "  Regular shell commands are sent directly to the PTY.".to_string(),
-                ];
-                Ok(ExecuteResult::DirectOutput(help_text))
-            },
-
-            "!history" => {
-                let limit = parts.get(1)
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(20);
-
-                match self.vault.recent_unique(limit) {
-                    Ok(history) => {
-                        if history.is_empty() {
-                            return Ok(ExecuteResult::DirectOutput(vec![
-                                "No command history yet.".to_string()
-                            ]));
-                        }
-
-                        let mut lines = vec![
-                            format!("📜 Last {} unique commands:", limit),
-                            "".to_string(),
-                        ];
-                        for (i, cmd) in history.iter().enumerate() {
-                            lines.push(format!("  {:3}  {}", i + 1, cmd));
-                        }
-                        Ok(ExecuteResult::DirectOutput(lines))
-                    },
-                    Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("❌ Error reading history: {}", e)
-                    ])),
-                }
-            },
-
-            "!search" => {
-                if parts.len() < 2 {
-                    return Ok(ExecuteResult::DirectOutput(vec![
-                        "Usage: !search <query>".to_string()
-                    ]));
-                }
-
-                let query = parts[1..].join(" ");
-                match self.vault.search_history(&query) {
-                    Ok(results) => {
-                        if results.is_empty() {
-                            return Ok(ExecuteResult::DirectOutput(vec![
-                                format!("No matches found for: {}", query)
-                            ]));
-                        }
-
-                        let mut lines = vec![
-                            format!("🔍 Search results for '{}': {} matches", query, results.len()),
-                            "".to_string(),
-                        ];
-                        for record in results.iter().take(20) {
-                            let time = chrono::DateTime::from_timestamp(record.timestamp, 0)
-                                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                                .unwrap_or_else(|| "unknown".to_string());
-                            lines.push(format!("  [{}] {}", time, record.command));
-                        }
-                        if results.len() > 20 {
-                            lines.push(format!("  ... and {} more", results.len() - 20));
-                        }
-                        Ok(ExecuteResult::DirectOutput(lines))
-                    },
-                    Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("❌ Error searching history: {}", e)
-                    ])),
-                }
-            },
-
-            "!top" => {
-                let limit = parts.get(1)
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(10);
-
-                match self.vault.top_commands(limit) {
-                    Ok(top) => {
-                        if top.is_empty() {
-                            return Ok(ExecuteResult::DirectOutput(vec![
-                                "No command history yet.".to_string()
-                            ]));
-                        }
-
-                        let mut lines = vec![
-                            format!("🏆 Top {} most-used commands:", limit),
-                            "".to_string(),
-                        ];
-                        for (i, cmd) in top.iter().enumerate() {
-                            lines.push(format!("  {:2}. {:4}× {}", i + 1, cmd.count, cmd.command));
-                        }
-                        Ok(ExecuteResult::DirectOutput(lines))
-                    },
-                    Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("❌ Error reading top commands: {}", e)
-                    ])),
-                }
-            },
-
-            "!stats" => {
-                match self.vault.stats() {
-                    Ok(stats) => {
-                        let earliest = stats.earliest_timestamp
-                            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-                            .map(|dt| dt.format("%Y-%m-%d").to_string())
-                            .unwrap_or_else(|| "N/A".to_string());
-
-                        let lines = vec![
-                            "╔══════════════════════════════════════════════════════════╗".to_string(),
-                            "║                   Vault Statistics                      ║".to_string(),
-                            "╚══════════════════════════════════════════════════════════╝".to_string(),
-                            "".to_string(),
-                            format!("  Total commands:      {:8}", stats.total_commands),
-                            format!("  Session commands:    {:8}", stats.session_commands),
-                            format!("  Unique commands:     {:8}", stats.unique_commands),
-                            format!("  Total sessions:      {:8}", stats.total_sessions),
-                            "".to_string(),
-                            format!("  Aliases defined:     {:8}", stats.alias_count),
-                            format!("  Bookmarks saved:     {:8}", stats.bookmark_count),
-                            "".to_string(),
-                            format!("  First command:       {}", earliest),
-                            format!("  Database size:       {:8} KB", stats.db_size_bytes / 1024),
-                        ];
-                        Ok(ExecuteResult::DirectOutput(lines))
-                    },
-                    Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("❌ Error reading stats: {}", e)
-                    ])),
-                }
-            },
-
-            "!alias" => {
-                if parts.len() == 1 {
-                    match self.vault.list_aliases() {
-                        Ok(aliases) => {
-                            if aliases.is_empty() {
-                                Ok(ExecuteResult::DirectOutput(vec![
-                                    "No aliases defined.".to_string(),
-                                    "".to_string(),
-                                    "Usage: !alias <name> <expansion>".to_string(),
-                                ]))
-                            } else {
-                                let mut lines = vec![
-                                    "📝 Defined aliases:".to_string(),
-                                    "".to_string(),
-                                ];
-                                for alias in aliases {
-                                    lines.push(format!("  {} = {}", alias.name, alias.expansion));
-                                }
-                                Ok(ExecuteResult::DirectOutput(lines))
-                            }
-                        },
-                        Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                            format!("❌ Error listing aliases: {}", e)
-                        ])),
-                    }
-                } else if parts.len() >= 3 {
-                    let name = parts[1];
-                    let expansion = parts[2..].join(" ");
-                    match self.vault.set_alias(name, &expansion) {
-                        Ok(_) => Ok(ExecuteResult::DirectOutput(vec![
-                            format!("✓ Alias set: {} = {}", name, expansion)
-                        ])),
-                        Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                            format!("❌ Error setting alias: {}", e)
-                        ])),
-                    }
-                } else {
-                    Ok(ExecuteResult::DirectOutput(vec![
-                        "Usage: !alias [name expansion...]".to_string(),
-                        "".to_string(),
-                        "  !alias              List all aliases".to_string(),
-                        "  !alias ll ls -la    Create alias".to_string(),
-                    ]))
-                }
-            },
-
-            "!unalias" => {
-                if parts.len() != 2 {
-                    return Ok(ExecuteResult::DirectOutput(vec![
-                        "Usage: !unalias <name>".to_string()
-                    ]));
-                }
-
-                let name = parts[1];
-                match self.vault.remove_alias(name) {
-                    Ok(true) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("✓ Alias removed: {}", name)
-                    ])),
-                    Ok(false) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("Alias not found: {}", name)
-                    ])),
-                    Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("❌ Error removing alias: {}", e)
-                    ])),
-                }
-            },
-
-            "!bookmark" => {
-                let label = if parts.len() > 1 {
-                    Some(parts[1..].join(" "))
-                } else {
-                    None
-                };
-
-                match self.vault.recent_unique(1) {
-                    Ok(history) if !history.is_empty() => {
-                        let last_cmd = &history[0];
-                        match self.vault.add_bookmark(last_cmd, label.as_deref()) {
-                            Ok(id) => Ok(ExecuteResult::DirectOutput(vec![
-                                format!("✓ Bookmarked (#{}):", id),
-                                format!("  {}", last_cmd),
-                                if let Some(l) = label {
-                                    format!("  Label: {}", l)
-                                } else {
-                                    "".to_string()
-                                }
-                            ])),
-                            Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                                format!("❌ Error saving bookmark: {}", e)
-                            ])),
-                        }
-                    },
-                    Ok(_) => Ok(ExecuteResult::DirectOutput(vec![
-                        "No commands to bookmark.".to_string()
-                    ])),
-                    Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("❌ Error reading history: {}", e)
-                    ])),
-                }
-            },
-
-            "!bookmarks" => {
-                match self.vault.list_bookmarks() {
-                    Ok(bookmarks) => {
-                        if bookmarks.is_empty() {
-                            return Ok(ExecuteResult::DirectOutput(vec![
-                                "No bookmarks saved.".to_string(),
-                                "".to_string(),
-                                "Usage: !bookmark [label]  (bookmarks last command)".to_string(),
-                            ]));
-                        }
-
-                        let mut lines = vec![
-                            "🔖 Saved bookmarks:".to_string(),
-                            "".to_string(),
-                        ];
-                        for bm in bookmarks {
-                            let label_str = bm.label
-                                .map(|l| format!(" [{}]", l))
-                                .unwrap_or_default();
-                            lines.push(format!("  #{}{}:", bm.id, label_str));
-                            lines.push(format!("    {}", bm.command));
-                        }
-                        Ok(ExecuteResult::DirectOutput(lines))
-                    },
-                    Err(e) => Ok(ExecuteResult::DirectOutput(vec![
-                        format!("❌ Error listing bookmarks: {}", e)
-                    ])),
-                }
-            },
-
-            _ => {
-                Ok(ExecuteResult::DirectOutput(vec![
-                    format!("❌ Unknown command: {}", command),
-                    "".to_string(),
-                    "Type !help for available commands.".to_string(),
-                ]))
-            }
-        }
-    }
-}
+// Re-export so `positronic_core::engine::ExecuteResult` keeps working.
+pub use crate::runner::ExecuteResult;
 
 #[derive(Debug)]
 pub struct PositronicEngine {
@@ -413,6 +45,7 @@ impl PositronicEngine {
         let pty_output_buf: Arc<std::sync::Mutex<Vec<u8>>> =
             Arc::new(std::sync::Mutex::new(Vec::with_capacity(8192)));
 
+        // PTY reader pump — feeds bytes into state machine and output buffer
         {
             let state_clone = state.clone();
             let buf_clone = pty_output_buf.clone();
@@ -424,6 +57,7 @@ impl PositronicEngine {
                     }
                     state_clone.process_bytes(&bytes);
 
+                    // Drain any immediately-available follow-up chunks
                     while let Ok(more) = rx_ptr.try_recv() {
                         if let Ok(mut buf) = buf_clone.lock() {
                             buf.extend_from_slice(&more);
@@ -435,6 +69,7 @@ impl PositronicEngine {
             });
         }
 
+        // Kick the shell so the initial prompt appears
         {
             let mut p = pty.lock().await;
             let _ = p.write_line("");
@@ -454,6 +89,7 @@ impl PositronicEngine {
         let (hive_node, mut hive_rx) = HiveNode::new("PositronicUser");
         let hive = Arc::new(hive_node);
 
+        // Hive event pump — echo peer events into the PTY
         {
             let pty_for_hive = pty.clone();
             let (tx, mut rx) = mpsc::channel::<String>(32);
@@ -488,6 +124,7 @@ impl PositronicEngine {
             });
         }
 
+        // Hardware I/O pump
         let (hardware_monitor, mut io_rx) = HardwareMonitor::start();
         let io = Arc::new(hardware_monitor);
 
@@ -528,6 +165,14 @@ impl PositronicEngine {
         })
     }
 
+    // ────────────────────────────────────────────────────────────────
+    // High-level command interface
+    // ────────────────────────────────────────────────────────────────
+
+    pub async fn send_input(&self, data: &str) -> Result<ExecuteResult> {
+        self.runner.execute(data).await
+    }
+
     pub fn drain_pty_output(&self) -> Vec<u8> {
         match self.pty_output_buf.lock() {
             Ok(mut buf) => std::mem::take(&mut *buf),
@@ -538,14 +183,49 @@ impl PositronicEngine {
         }
     }
 
-    pub async fn send_input(&self, data: &str) -> Result<ExecuteResult> {
-        self.runner.execute(data).await
-    }
-
     pub async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let mut pty = self.pty.lock().await;
         pty.resize(cols, rows)?;
         self.state.resize(cols, rows);
+        let _ = self.redraw_notifier.try_send(());
+        Ok(())
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Low-level PTY control signals  (PAGER-TRAP BUGFIX)
+    //
+    // These allow the UI to send raw control characters to the PTY
+    // without going through the Runner command pipeline.
+    // ────────────────────────────────────────────────────────────────
+
+    /// Send Ctrl+C (ETX / 0x03) — interrupt the running process / exit pager.
+    pub async fn send_interrupt(&self) -> Result<()> {
+        let mut pty = self.pty.lock().await;
+        pty.write_raw("\x03")?;
+        let _ = self.redraw_notifier.try_send(());
+        Ok(())
+    }
+
+    /// Send Escape (0x1b) — exit vi-style pagers, cancel prompts.
+    pub async fn send_escape(&self) -> Result<()> {
+        let mut pty = self.pty.lock().await;
+        pty.write_raw("\x1b")?;
+        let _ = self.redraw_notifier.try_send(());
+        Ok(())
+    }
+
+    /// Send Ctrl+D (EOT / 0x04) — signal end-of-input.
+    pub async fn send_eof(&self) -> Result<()> {
+        let mut pty = self.pty.lock().await;
+        pty.write_raw("\x04")?;
+        let _ = self.redraw_notifier.try_send(());
+        Ok(())
+    }
+
+    /// Send arbitrary raw data to the PTY (no newline appended).
+    pub async fn send_raw(&self, data: &str) -> Result<()> {
+        let mut pty = self.pty.lock().await;
+        pty.write_raw(data)?;
         let _ = self.redraw_notifier.try_send(());
         Ok(())
     }

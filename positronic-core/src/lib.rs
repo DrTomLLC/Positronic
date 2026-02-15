@@ -1,4 +1,5 @@
 pub mod airlock;
+pub mod builtins;
 pub mod engine;
 pub mod pty_manager;
 pub mod runner;

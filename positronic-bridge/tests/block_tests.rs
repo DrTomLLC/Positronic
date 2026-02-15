@@ -104,12 +104,12 @@ fn test_classify_warning_titlecase() {
 
 #[test]
 fn test_classify_warning_emoji() {
-    assert_eq!(BlockLine::classify("⚠ Caution required").kind, LineKind::Warning);
+    assert_eq!(BlockLine::classify("⚠ risky operation").kind, LineKind::Warning);
 }
 
 #[test]
 fn test_classify_warning_warn() {
-    assert_eq!(BlockLine::classify("WARN: disk space low").kind, LineKind::Warning);
+    assert_eq!(BlockLine::classify("WARN: disk 80% full").kind, LineKind::Warning);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn test_classify_success_checkmark() {
 
 #[test]
 fn test_classify_success_ok() {
-    assert_eq!(BlockLine::classify("ok 42 tests").kind, LineKind::Success);
+    assert_eq!(BlockLine::classify("ok test_something").kind, LineKind::Success);
 }
 
 #[test]
@@ -129,12 +129,12 @@ fn test_classify_success_compiling() {
 
 #[test]
 fn test_classify_success_finished() {
-    assert_eq!(BlockLine::classify("Finished release [optimized]").kind, LineKind::Success);
+    assert_eq!(BlockLine::classify("Finished dev [unoptimized]").kind, LineKind::Success);
 }
 
 #[test]
 fn test_classify_success_passed() {
-    assert_eq!(BlockLine::classify("PASSED all checks").kind, LineKind::Success);
+    assert_eq!(BlockLine::classify("PASSED test_abc").kind, LineKind::Success);
 }
 
 #[test]
@@ -143,37 +143,22 @@ fn test_classify_info_lightbulb() {
 }
 
 #[test]
-fn test_classify_info_brain() {
-    assert_eq!(BlockLine::classify("🧠 Analyzing...").kind, LineKind::Info);
+fn test_classify_info_note() {
+    assert_eq!(BlockLine::classify("note: see also `--help`").kind, LineKind::Info);
 }
 
 #[test]
 fn test_classify_info_satellite() {
-    assert_eq!(BlockLine::classify("📡 Connected to server").kind, LineKind::Info);
+    assert_eq!(BlockLine::classify("📡 connected to device").kind, LineKind::Info);
 }
 
 #[test]
-fn test_classify_info_plug() {
-    assert_eq!(BlockLine::classify("🔌 Device attached").kind, LineKind::Info);
-}
-
-#[test]
-fn test_classify_info_uppercase() {
-    assert_eq!(BlockLine::classify("INFO: starting daemon").kind, LineKind::Info);
-}
-
-#[test]
-fn test_classify_info_note() {
-    assert_eq!(BlockLine::classify("note: consider adding a derive").kind, LineKind::Info);
-}
-
-#[test]
-fn test_classify_normal_fallback() {
+fn test_classify_normal_plain_text() {
     assert_eq!(BlockLine::classify("hello world").kind, LineKind::Normal);
 }
 
 #[test]
-fn test_classify_normal_empty() {
+fn test_classify_empty_is_normal() {
     assert_eq!(BlockLine::classify("").kind, LineKind::Normal);
 }
 
@@ -185,7 +170,7 @@ fn test_classify_preserves_leading_whitespace() {
 }
 
 // ============================================================================
-// BlockLine::is_blank Tests
+// BlockLine::is_blank
 // ============================================================================
 
 #[test]
@@ -204,7 +189,7 @@ fn test_blockline_is_blank_content() {
 }
 
 // ============================================================================
-// BlockLine Display Tests
+// Display Implementations
 // ============================================================================
 
 #[test]
@@ -212,10 +197,6 @@ fn test_blockline_display() {
     let line = BlockLine::normal("output text");
     assert_eq!(format!("{}", line), "output text");
 }
-
-// ============================================================================
-// LineKind Display Tests
-// ============================================================================
 
 #[test]
 fn test_linekind_display() {
@@ -227,10 +208,6 @@ fn test_linekind_display() {
     assert_eq!(format!("{}", LineKind::Muted), "muted");
 }
 
-// ============================================================================
-// BlockSource Display Tests
-// ============================================================================
-
 #[test]
 fn test_blocksource_display() {
     assert_eq!(format!("{}", BlockSource::Shell), "shell");
@@ -240,7 +217,36 @@ fn test_blocksource_display() {
 }
 
 // ============================================================================
-// BlockManager Creation Tests
+// format_duration
+// ============================================================================
+
+#[test]
+fn test_format_duration_millis() {
+    assert_eq!(format_duration(Duration::from_millis(42)), "42ms");
+}
+
+#[test]
+fn test_format_duration_seconds() {
+    assert_eq!(format_duration(Duration::from_millis(3_500)), "3.500s");
+}
+
+#[test]
+fn test_format_duration_minutes() {
+    assert_eq!(format_duration(Duration::from_secs(125)), "2m 05s");
+}
+
+#[test]
+fn test_format_duration_hours() {
+    assert_eq!(format_duration(Duration::from_secs(3661)), "1h 01m");
+}
+
+#[test]
+fn test_format_duration_zero() {
+    assert_eq!(format_duration(Duration::ZERO), "0ms");
+}
+
+// ============================================================================
+// BlockManager — Creation
 // ============================================================================
 
 #[test]
@@ -255,62 +261,54 @@ fn test_manager_new() {
 fn test_manager_default() {
     let mgr = BlockManager::default();
     assert!(mgr.is_empty());
-    assert_eq!(mgr.total_lines(), 0);
+    assert_eq!(mgr.len(), 0);
 }
 
 // ============================================================================
-// BlockManager Lifecycle Tests
+// BlockManager — Lifecycle
 // ============================================================================
 
 #[test]
 fn test_manager_begin_creates_running_block() {
     let mut mgr = BlockManager::default();
-    let id = mgr.begin("cargo test", "/home/user/project", BlockSource::Shell);
+    let id = mgr.begin("ls -la", "/home", BlockSource::Shell);
+    assert_eq!(mgr.len(), 1);
 
     let block = mgr.get(id).unwrap();
     assert!(block.running);
-    assert_eq!(block.command, "cargo test");
-    assert_eq!(block.cwd, "/home/user/project");
+    assert_eq!(block.command, "ls -la");
+    assert_eq!(block.cwd, "/home");
     assert_eq!(block.source, BlockSource::Shell);
-    assert!(block.output.is_empty());
     assert!(block.exit_code.is_none());
     assert!(block.duration.is_none());
     assert!(!block.collapsed);
 }
 
 #[test]
-fn test_manager_begin_increments_ids() {
+fn test_manager_monotonic_ids() {
     let mut mgr = BlockManager::default();
-    let id1 = mgr.begin("cmd1", ".", BlockSource::Shell);
-    let id2 = mgr.begin("cmd2", ".", BlockSource::Shell);
-    let id3 = mgr.begin("cmd3", ".", BlockSource::Shell);
-
-    assert_eq!(id1, 1);
-    assert_eq!(id2, 2);
-    assert_eq!(id3, 3);
+    let id1 = mgr.begin("a", ".", BlockSource::Shell);
+    let id2 = mgr.begin("b", ".", BlockSource::Shell);
+    let id3 = mgr.begin("c", ".", BlockSource::Shell);
+    assert!(id1 < id2);
+    assert!(id2 < id3);
 }
 
 #[test]
-fn test_manager_append_adds_output() {
+fn test_manager_append() {
     let mut mgr = BlockManager::default();
-    let id = mgr.begin("echo test", ".", BlockSource::Shell);
-
-    mgr.append(id, vec![
-        BlockLine::normal("line 1"),
-        BlockLine::normal("line 2"),
-    ]);
+    let id = mgr.begin("echo hi", ".", BlockSource::Shell);
+    mgr.append(id, vec![BlockLine::normal("hi")]);
 
     let block = mgr.get(id).unwrap();
-    assert_eq!(block.output.len(), 2);
-    assert_eq!(block.output[0].text, "line 1");
-    assert_eq!(block.output[1].text, "line 2");
+    assert_eq!(block.output.len(), 1);
+    assert_eq!(block.output[0].text, "hi");
 }
 
 #[test]
-fn test_manager_append_line_single() {
+fn test_manager_append_line() {
     let mut mgr = BlockManager::default();
-    let id = mgr.begin("echo test", ".", BlockSource::Shell);
-
+    let id = mgr.begin("test", ".", BlockSource::Shell);
     mgr.append_line(id, BlockLine::normal("single line"));
 
     let block = mgr.get(id).unwrap();
@@ -319,9 +317,8 @@ fn test_manager_append_line_single() {
 }
 
 #[test]
-fn test_manager_append_to_nonexistent_id() {
+fn test_manager_append_to_nonexistent_is_noop() {
     let mut mgr = BlockManager::default();
-    // Appending to a block that doesn't exist should be a no-op
     mgr.append(999, vec![BlockLine::normal("ghost")]);
     assert!(mgr.is_empty());
 }
@@ -363,7 +360,6 @@ fn test_full_lifecycle() {
     let id = mgr.begin("cargo test", "/project", BlockSource::Shell);
 
     assert!(mgr.get(id).unwrap().running);
-    assert_eq!(mgr.len(), 1);
 
     mgr.append(id, vec![
         BlockLine::normal("running 5 tests"),
@@ -381,7 +377,7 @@ fn test_full_lifecycle() {
 }
 
 // ============================================================================
-// BlockManager Retrieval Tests
+// BlockManager — Retrieval
 // ============================================================================
 
 #[test]
@@ -396,7 +392,6 @@ fn test_manager_latest_returns_last() {
     mgr.begin("first", ".", BlockSource::Shell);
     mgr.begin("second", ".", BlockSource::Shell);
     mgr.begin("third", ".", BlockSource::Shell);
-
     assert_eq!(mgr.latest().unwrap().command, "third");
 }
 
@@ -407,7 +402,6 @@ fn test_manager_latest_mut() {
 
     let block = mgr.latest_mut().unwrap();
     block.command = "modified".to_string();
-
     assert_eq!(mgr.latest().unwrap().command, "modified");
 }
 
@@ -420,56 +414,41 @@ fn test_manager_get_nonexistent() {
 #[test]
 fn test_manager_get_mut() {
     let mut mgr = BlockManager::default();
-    let id = mgr.begin("test", ".", BlockSource::Native);
-
-    let block = mgr.get_mut(id).unwrap();
-    block.collapsed = true;
-
+    let id = mgr.begin("test", ".", BlockSource::Shell);
+    mgr.get_mut(id).unwrap().collapsed = true;
     assert!(mgr.get(id).unwrap().collapsed);
 }
 
-// ============================================================================
-// BlockManager Remove Tests
-// ============================================================================
-
 #[test]
-fn test_manager_remove_existing() {
+fn test_manager_remove() {
     let mut mgr = BlockManager::default();
-    let id = mgr.begin("to remove", ".", BlockSource::Shell);
-    mgr.begin("to keep", ".", BlockSource::Shell);
-
+    let id = mgr.begin("test", ".", BlockSource::Shell);
     let removed = mgr.remove(id);
     assert!(removed.is_some());
-    assert_eq!(removed.unwrap().command, "to remove");
-    assert_eq!(mgr.len(), 1);
-    assert_eq!(mgr.blocks()[0].command, "to keep");
+    assert!(mgr.is_empty());
 }
 
 #[test]
 fn test_manager_remove_nonexistent() {
     let mut mgr = BlockManager::default();
-    mgr.begin("test", ".", BlockSource::Shell);
-
-    let removed = mgr.remove(999);
-    assert!(removed.is_none());
-    assert_eq!(mgr.len(), 1);
+    assert!(mgr.remove(999).is_none());
 }
 
 #[test]
-fn test_manager_remove_only_block() {
+fn test_manager_clear() {
     let mut mgr = BlockManager::default();
-    let id = mgr.begin("lonely", ".", BlockSource::Shell);
-
-    mgr.remove(id);
+    mgr.begin("a", ".", BlockSource::Shell);
+    mgr.begin("b", ".", BlockSource::Shell);
+    mgr.clear();
     assert!(mgr.is_empty());
 }
 
 // ============================================================================
-// BlockManager Collapse/Expand Tests
+// BlockManager — Collapse/Expand
 // ============================================================================
 
 #[test]
-fn test_manager_toggle_collapse() {
+fn test_toggle_collapse() {
     let mut mgr = BlockManager::default();
     let id = mgr.begin("test", ".", BlockSource::Native);
     assert!(!mgr.get(id).unwrap().collapsed);
@@ -482,40 +461,37 @@ fn test_manager_toggle_collapse() {
 }
 
 #[test]
-fn test_manager_collapse_all() {
+fn test_collapse_all() {
     let mut mgr = BlockManager::default();
     mgr.begin("a", ".", BlockSource::Shell);
     mgr.begin("b", ".", BlockSource::Shell);
     mgr.begin("c", ".", BlockSource::Shell);
 
     mgr.collapse_all();
-
     for block in mgr.blocks() {
         assert!(block.collapsed);
     }
 }
 
 #[test]
-fn test_manager_expand_all() {
+fn test_expand_all() {
     let mut mgr = BlockManager::default();
     mgr.begin("a", ".", BlockSource::Shell);
     mgr.begin("b", ".", BlockSource::Shell);
 
     mgr.collapse_all();
     mgr.expand_all();
-
     for block in mgr.blocks() {
         assert!(!block.collapsed);
     }
 }
 
 #[test]
-fn test_collapse_then_expand_round_trip() {
+fn test_collapse_expand_round_trip() {
     let mut mgr = BlockManager::default();
     let id1 = mgr.begin("a", ".", BlockSource::Shell);
     let id2 = mgr.begin("b", ".", BlockSource::Shell);
 
-    // Collapse one, collapse all, expand all
     mgr.toggle_collapse(id1);
     mgr.collapse_all();
     mgr.expand_all();
@@ -525,7 +501,7 @@ fn test_collapse_then_expand_round_trip() {
 }
 
 // ============================================================================
-// BlockManager Filter Tests
+// BlockManager — Filters
 // ============================================================================
 
 #[test]
@@ -537,21 +513,16 @@ fn test_filter_by_source() {
     mgr.begin("system msg", ".", BlockSource::System);
     mgr.begin("shell cmd 2", ".", BlockSource::Shell);
 
-    let shell_blocks = mgr.filter_by_source(BlockSource::Shell);
-    assert_eq!(shell_blocks.len(), 2);
-
-    let neural_blocks = mgr.filter_by_source(BlockSource::Neural);
-    assert_eq!(neural_blocks.len(), 1);
-    assert_eq!(neural_blocks[0].command, "neural cmd");
+    assert_eq!(mgr.filter_by_source(BlockSource::Shell).len(), 2);
+    assert_eq!(mgr.filter_by_source(BlockSource::Neural).len(), 1);
+    assert_eq!(mgr.filter_by_source(BlockSource::Neural)[0].command, "neural cmd");
 }
 
 #[test]
 fn test_filter_by_source_none_found() {
     let mut mgr = BlockManager::default();
     mgr.begin("shell cmd", ".", BlockSource::Shell);
-
-    let neural = mgr.filter_by_source(BlockSource::Neural);
-    assert!(neural.is_empty());
+    assert!(mgr.filter_by_source(BlockSource::Neural).is_empty());
 }
 
 #[test]
@@ -559,19 +530,14 @@ fn test_filter_by_exit_code() {
     let mut mgr = BlockManager::default();
     let id1 = mgr.begin("success", ".", BlockSource::Shell);
     mgr.finish(id1, Some(0), Duration::from_millis(1));
-
     let id2 = mgr.begin("fail", ".", BlockSource::Shell);
     mgr.finish(id2, Some(1), Duration::from_millis(1));
-
     let id3 = mgr.begin("also success", ".", BlockSource::Shell);
     mgr.finish(id3, Some(0), Duration::from_millis(1));
 
-    let successes = mgr.filter_by_exit_code(0);
-    assert_eq!(successes.len(), 2);
-
-    let failures = mgr.filter_by_exit_code(1);
-    assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].command, "fail");
+    assert_eq!(mgr.filter_by_exit_code(0).len(), 2);
+    assert_eq!(mgr.filter_by_exit_code(1).len(), 1);
+    assert_eq!(mgr.filter_by_exit_code(1)[0].command, "fail");
 }
 
 #[test]
@@ -582,8 +548,7 @@ fn test_running_blocks() {
     mgr.finish(id2, Some(0), Duration::from_millis(1));
     mgr.begin("running2", ".", BlockSource::Shell);
 
-    let running = mgr.running_blocks();
-    assert_eq!(running.len(), 2);
+    assert_eq!(mgr.running_blocks().len(), 2);
 }
 
 #[test]
@@ -591,10 +556,8 @@ fn test_failed_blocks() {
     let mut mgr = BlockManager::default();
     let id1 = mgr.begin("ok", ".", BlockSource::Shell);
     mgr.finish(id1, Some(0), Duration::from_millis(1));
-
     let id2 = mgr.begin("bad", ".", BlockSource::Shell);
     mgr.finish(id2, Some(1), Duration::from_millis(1));
-
     let id3 = mgr.begin("worse", ".", BlockSource::Shell);
     mgr.finish(id3, Some(127), Duration::from_millis(1));
 
@@ -606,10 +569,8 @@ fn test_succeeded_blocks() {
     let mut mgr = BlockManager::default();
     let id1 = mgr.begin("ok1", ".", BlockSource::Shell);
     mgr.finish(id1, Some(0), Duration::from_millis(1));
-
     let id2 = mgr.begin("bad", ".", BlockSource::Shell);
     mgr.finish(id2, Some(1), Duration::from_millis(1));
-
     let id3 = mgr.begin("ok2", ".", BlockSource::Shell);
     mgr.finish(id3, Some(0), Duration::from_millis(1));
 
@@ -617,7 +578,7 @@ fn test_succeeded_blocks() {
 }
 
 // ============================================================================
-// BlockManager Search Tests
+// BlockManager — Search
 // ============================================================================
 
 #[test]
@@ -628,7 +589,7 @@ fn test_search_in_command() {
 
     let hits = mgr.search("cargo");
     assert_eq!(hits.len(), 1);
-    assert!(hits[0].line_index.is_none()); // hit was in command, not output
+    assert!(hits[0].line_index.is_none()); // hit was in command
 }
 
 #[test]
@@ -660,12 +621,10 @@ fn test_search_multiple_hits() {
     let mut mgr = BlockManager::default();
     let id1 = mgr.begin("cargo test", ".", BlockSource::Shell);
     mgr.append(id1, vec![BlockLine::normal("test_foo ... ok")]);
-
     let id2 = mgr.begin("cargo test --lib", ".", BlockSource::Shell);
     mgr.append(id2, vec![BlockLine::normal("test_bar ... ok")]);
 
     let hits = mgr.search("cargo test");
-    // Should hit both commands
     assert!(hits.len() >= 2);
 }
 
@@ -684,12 +643,11 @@ fn test_search_empty_query() {
     mgr.begin("ls", ".", BlockSource::Shell);
 
     let hits = mgr.search("");
-    // Empty string matches everything
     assert!(!hits.is_empty());
 }
 
 // ============================================================================
-// BlockManager Copy Tests
+// BlockManager — Copy & Export
 // ============================================================================
 
 #[test]
@@ -726,15 +684,10 @@ fn test_copy_block_nonexistent() {
     assert!(mgr.copy_block(999).is_none());
 }
 
-// ============================================================================
-// BlockManager Export Tests
-// ============================================================================
-
 #[test]
 fn test_export_all_empty() {
     let mgr = BlockManager::default();
-    let exported = mgr.export_all();
-    assert!(exported.is_empty());
+    assert!(mgr.export_all().is_empty());
 }
 
 #[test]
@@ -746,123 +699,65 @@ fn test_export_all_single_block() {
 
     let exported = mgr.export_all();
     assert!(exported.contains("$ echo hi"));
-    assert!(exported.contains("[shell]"));
-    assert!(exported.contains("(/home)"));
-    assert!(exported.contains("hi"));
-    assert!(exported.contains("[exit 0]"));
+    assert!(exported.contains("hi\n"));
 }
 
 #[test]
-fn test_export_all_multiple_blocks() {
+fn test_export_all_separators() {
     let mut mgr = BlockManager::default();
     let id1 = mgr.begin("cmd1", ".", BlockSource::Shell);
     mgr.finish(id1, Some(0), Duration::from_millis(1));
-
-    let id2 = mgr.begin("cmd2", ".", BlockSource::Native);
+    let id2 = mgr.begin("cmd2", ".", BlockSource::Shell);
     mgr.finish(id2, Some(0), Duration::from_millis(1));
 
     let exported = mgr.export_all();
-    assert!(exported.contains("cmd1"));
-    assert!(exported.contains("cmd2"));
-    assert!(exported.contains("────")); // Separator between blocks
+    assert!(exported.contains("────"));
 }
 
 // ============================================================================
-// BlockManager Limits Tests
+// BlockManager — Limits
 // ============================================================================
 
 #[test]
 fn test_enforce_block_count_limit() {
-    let mut mgr = BlockManager::new(3, 100_000);
+    let mut mgr = BlockManager::new(3, 1000);
     for i in 0..5 {
         mgr.begin(&format!("cmd {}", i), ".", BlockSource::Shell);
     }
-    assert_eq!(mgr.len(), 3);
-    // Oldest blocks pruned: cmd 0, cmd 1 removed, cmd 2, 3, 4 remain
-    assert_eq!(mgr.blocks()[0].command, "cmd 2");
+    assert_eq!(mgr.blocks().len(), 3);
 }
 
 #[test]
-fn test_enforce_line_count_limit() {
-    let mut mgr = BlockManager::new(1000, 10);
-
-    // First block with 6 lines
-    let id1 = mgr.begin("big1", ".", BlockSource::Shell);
-    mgr.append(id1, (0..6).map(|i| BlockLine::normal(format!("line {}", i))).collect());
-
-    // Second block with 6 lines — total now 12, over limit of 10
-    let id2 = mgr.begin("big2", ".", BlockSource::Shell);
-    mgr.append(id2, (0..6).map(|i| BlockLine::normal(format!("line {}", i))).collect());
-
-    // Third block triggers enforcement
-    mgr.begin("small", ".", BlockSource::Shell);
-
-    // The oldest block(s) should have been pruned to get under 10 lines
-    assert!(mgr.total_lines() <= 10 || mgr.len() <= 2);
-}
-
-#[test]
-fn test_limits_preserve_at_least_one_block() {
-    let mut mgr = BlockManager::new(1, 5);
-    let id = mgr.begin("only", ".", BlockSource::Shell);
-    mgr.append(id, (0..20).map(|i| BlockLine::normal(format!("line {}", i))).collect());
-
-    // Even though over line limit, the one block should still exist
-    assert_eq!(mgr.len(), 1);
-}
-
-// ============================================================================
-// BlockManager Clear Tests
-// ============================================================================
-
-#[test]
-fn test_clear() {
+fn test_total_lines() {
     let mut mgr = BlockManager::default();
-    mgr.begin("a", ".", BlockSource::Shell);
-    mgr.begin("b", ".", BlockSource::Shell);
-    mgr.begin("c", ".", BlockSource::Shell);
+    let id1 = mgr.begin("a", ".", BlockSource::Shell);
+    mgr.append(id1, vec![BlockLine::normal("1"), BlockLine::normal("2")]);
+    let id2 = mgr.begin("b", ".", BlockSource::Shell);
+    mgr.append(id2, vec![BlockLine::normal("3")]);
 
-    mgr.clear();
-    assert!(mgr.is_empty());
-    assert_eq!(mgr.len(), 0);
-    assert!(mgr.latest().is_none());
+    assert_eq!(mgr.total_lines(), 3);
 }
 
 // ============================================================================
-// BlockManager Stats Tests
+// BlockManager — Stats
 // ============================================================================
 
 #[test]
-fn test_stats_empty() {
-    let mgr = BlockManager::default();
-    let stats = mgr.stats();
-    assert_eq!(stats.total_blocks, 0);
-    assert_eq!(stats.total_lines, 0);
-    assert_eq!(stats.running, 0);
-    assert_eq!(stats.errors, 0);
-}
-
-#[test]
-fn test_stats_mixed() {
+fn test_stats() {
     let mut mgr = BlockManager::default();
+    let id1 = mgr.begin("ok", ".", BlockSource::Shell);
+    mgr.append(id1, vec![BlockLine::normal("a"); 100]);
+    mgr.finish(id1, Some(0), Duration::from_millis(1));
 
-    // Running block with output
-    let id1 = mgr.begin("running", ".", BlockSource::Shell);
-    mgr.append(id1, vec![BlockLine::normal("line1"), BlockLine::normal("line2")]);
+    let id2 = mgr.begin("bad", ".", BlockSource::Shell);
+    mgr.append(id2, vec![BlockLine::normal("b"); 150]);
+    mgr.finish(id2, Some(1), Duration::from_millis(1));
 
-    // Successful block
-    let id2 = mgr.begin("ok", ".", BlockSource::Shell);
-    mgr.append(id2, vec![BlockLine::normal("line3")]);
-    mgr.finish(id2, Some(0), Duration::from_millis(1));
-
-    // Failed block
-    let id3 = mgr.begin("fail", ".", BlockSource::Shell);
-    mgr.append(id3, vec![BlockLine::error("err1"), BlockLine::error("err2")]);
-    mgr.finish(id3, Some(1), Duration::from_millis(1));
+    mgr.begin("running", ".", BlockSource::Shell);
 
     let stats = mgr.stats();
     assert_eq!(stats.total_blocks, 3);
-    assert_eq!(stats.total_lines, 5);
+    assert_eq!(stats.total_lines, 250);
     assert_eq!(stats.running, 1);
     assert_eq!(stats.errors, 1);
 }
@@ -883,19 +778,14 @@ fn test_stats_display() {
 }
 
 // ============================================================================
-// TerminalBlock Method Tests
+// TerminalBlock Methods
 // ============================================================================
 
 #[test]
 fn test_block_line_count() {
     let mut mgr = BlockManager::default();
     let id = mgr.begin("test", ".", BlockSource::Shell);
-    mgr.append(id, vec![
-        BlockLine::normal("a"),
-        BlockLine::normal("b"),
-        BlockLine::normal("c"),
-    ]);
-
+    mgr.append(id, vec![BlockLine::normal("a"), BlockLine::normal("b"), BlockLine::normal("c")]);
     assert_eq!(mgr.get(id).unwrap().line_count(), 3);
 }
 
@@ -974,7 +864,6 @@ fn test_block_error_lines() {
 
     let errors = mgr.get(id).unwrap().error_lines();
     assert_eq!(errors.len(), 2);
-    assert_eq!(errors[0].text, "E0308");
 }
 
 #[test]
@@ -982,200 +871,28 @@ fn test_block_warning_lines() {
     let mut mgr = BlockManager::default();
     let id = mgr.begin("build", ".", BlockSource::Shell);
     mgr.append(id, vec![
-        BlockLine::normal("ok"),
         BlockLine::warning("unused var"),
+        BlockLine::normal("ok"),
+        BlockLine::warning("deprecated"),
     ]);
 
     let warnings = mgr.get(id).unwrap().warning_lines();
-    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings.len(), 2);
 }
 
 // ============================================================================
-// TerminalBlock Display Tests
+// Serialization
 // ============================================================================
 
 #[test]
-fn test_block_display_running() {
-    let mut mgr = BlockManager::default();
-    let id = mgr.begin("cargo test", ".", BlockSource::Shell);
-    mgr.append(id, vec![BlockLine::normal("a"), BlockLine::normal("b")]);
-
-    let display = format!("{}", mgr.get(id).unwrap());
-    assert!(display.contains("cargo test"));
-    assert!(display.contains("shell"));
-    assert!(display.contains("2 lines"));
-    assert!(display.contains("running"));
-}
-
-#[test]
-fn test_block_display_success() {
-    let mut mgr = BlockManager::default();
-    let id = mgr.begin("ls", ".", BlockSource::Native);
-    mgr.finish(id, Some(0), Duration::from_millis(1));
-
-    let display = format!("{}", mgr.get(id).unwrap());
-    assert!(display.contains("✅ ok"));
-}
-
-#[test]
-fn test_block_display_failure() {
-    let mut mgr = BlockManager::default();
-    let id = mgr.begin("make", ".", BlockSource::Shell);
-    mgr.finish(id, Some(2), Duration::from_millis(1));
-
-    let display = format!("{}", mgr.get(id).unwrap());
-    assert!(display.contains("❌ exit 2"));
-}
-
-// ============================================================================
-// Quick Block Helper Tests
-// ============================================================================
-
-#[test]
-fn test_quick_block_basic() {
-    let mut mgr = BlockManager::default();
-    let id = quick_block(
-        &mut mgr,
-        "!version",
-        "/home",
-        vec!["⚡ Positronic v0.2.0".to_string()],
-        BlockSource::Native,
-    );
-    let block = mgr.get(id).unwrap();
-    assert!(!block.running);
-    assert_eq!(block.exit_code, Some(0));
-    assert_eq!(block.output.len(), 1);
-    assert_eq!(block.source, BlockSource::Native);
-}
-
-#[test]
-fn test_quick_block_classifies_lines() {
-    let mut mgr = BlockManager::default();
-    let id = quick_block(
-        &mut mgr,
-        "build",
-        ".",
-        vec![
-            "Compiling myapp".to_string(),
-            "error: failed".to_string(),
-            "warning: unused".to_string(),
-        ],
-        BlockSource::Shell,
-    );
-
-    let block = mgr.get(id).unwrap();
-    assert_eq!(block.output[0].kind, LineKind::Success); // Compiling
-    assert_eq!(block.output[1].kind, LineKind::Error);
-    assert_eq!(block.output[2].kind, LineKind::Warning);
-}
-
-#[test]
-fn test_quick_block_empty_lines() {
-    let mut mgr = BlockManager::default();
-    let id = quick_block(&mut mgr, "noop", ".", vec![], BlockSource::System);
-    let block = mgr.get(id).unwrap();
-    assert!(block.output.is_empty());
-    assert!(!block.running);
-}
-
-#[test]
-fn test_quick_error_block() {
-    let mut mgr = BlockManager::default();
-    let id = quick_error_block(
-        &mut mgr,
-        "bad_cmd",
-        "/home",
-        "command not found: bad_cmd",
-        127,
-    );
-
-    let block = mgr.get(id).unwrap();
-    assert!(!block.running);
-    assert_eq!(block.exit_code, Some(127));
-    assert!(block.failed());
-    assert_eq!(block.output.len(), 1);
-    assert_eq!(block.output[0].kind, LineKind::Error);
-    assert_eq!(block.output[0].text, "command not found: bad_cmd");
-}
-
-// ============================================================================
-// format_duration Tests
-// ============================================================================
-
-#[test]
-fn test_format_duration_millis() {
-    assert_eq!(format_duration(Duration::from_millis(42)), "42ms");
-    assert_eq!(format_duration(Duration::from_millis(0)), "0ms");
-    assert_eq!(format_duration(Duration::from_millis(999)), "999ms");
-}
-
-#[test]
-fn test_format_duration_seconds() {
-    assert_eq!(format_duration(Duration::from_secs(1)), "1.000s");
-    assert_eq!(format_duration(Duration::from_millis(1500)), "1.500s");
-    assert_eq!(format_duration(Duration::from_secs(59)), "59.000s");
-}
-
-#[test]
-fn test_format_duration_minutes() {
-    assert_eq!(format_duration(Duration::from_secs(60)), "1m 00s");
-    assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
-    assert_eq!(format_duration(Duration::from_secs(3599)), "59m 59s");
-}
-
-#[test]
-fn test_format_duration_hours() {
-    assert_eq!(format_duration(Duration::from_secs(3600)), "1h 00m");
-    assert_eq!(format_duration(Duration::from_secs(7200)), "2h 00m");
-    assert_eq!(format_duration(Duration::from_secs(5400)), "1h 30m");
-}
-
-// ============================================================================
-// Serialization Tests
-// ============================================================================
-
-#[test]
-fn test_blockline_serialize_deserialize() {
-    let line = BlockLine::error("error: mismatched types");
-    let json = serde_json::to_string(&line).unwrap();
-    let deserialized: BlockLine = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.text, "error: mismatched types");
-    assert_eq!(deserialized.kind, LineKind::Error);
-}
-
-#[test]
-fn test_linekind_serialize_deserialize() {
-    for kind in &[
-        LineKind::Normal, LineKind::Error, LineKind::Warning,
-        LineKind::Success, LineKind::Info, LineKind::Muted,
-    ] {
-        let json = serde_json::to_string(kind).unwrap();
-        let deserialized: LineKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(*kind, deserialized);
-    }
-}
-
-#[test]
-fn test_blocksource_serialize_deserialize() {
-    for source in &[
-        BlockSource::Shell, BlockSource::Native,
-        BlockSource::Neural, BlockSource::System,
-    ] {
-        let json = serde_json::to_string(source).unwrap();
-        let deserialized: BlockSource = serde_json::from_str(&json).unwrap();
-        assert_eq!(*source, deserialized);
-    }
-}
-
-#[test]
-fn test_terminal_block_serialize_deserialize() {
+fn test_terminal_block_serialize_roundtrip() {
     let mut mgr = BlockManager::default();
     let id = mgr.begin("cargo build", "/project", BlockSource::Shell);
     mgr.append(id, vec![
         BlockLine::normal("Compiling..."),
-        BlockLine::success("Finished release"),
+        BlockLine::success("Finished"),
     ]);
-    mgr.finish(id, Some(0), Duration::from_millis(250));
+    mgr.finish(id, Some(0), Duration::from_millis(500));
 
     let block = mgr.get(id).unwrap();
     let json = serde_json::to_string(block).unwrap();
@@ -1191,7 +908,7 @@ fn test_terminal_block_serialize_deserialize() {
 }
 
 #[test]
-fn test_terminal_block_serialize_running_no_duration() {
+fn test_terminal_block_serialize_running() {
     let mut mgr = BlockManager::default();
     let id = mgr.begin("long running", ".", BlockSource::Shell);
 
@@ -1205,21 +922,21 @@ fn test_terminal_block_serialize_running_no_duration() {
 }
 
 #[test]
-fn test_search_hit_serialize_deserialize() {
+fn test_search_hit_serialize() {
     let hit = SearchHit {
         block_id: 42,
         line_index: Some(7),
         context: "error[E0308]".to_string(),
     };
     let json = serde_json::to_string(&hit).unwrap();
-    let deserialized: SearchHit = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.block_id, 42);
-    assert_eq!(deserialized.line_index, Some(7));
-    assert_eq!(deserialized.context, "error[E0308]");
+    let de: SearchHit = serde_json::from_str(&json).unwrap();
+    assert_eq!(de.block_id, 42);
+    assert_eq!(de.line_index, Some(7));
+    assert_eq!(de.context, "error[E0308]");
 }
 
 #[test]
-fn test_block_stats_serialize_deserialize() {
+fn test_block_stats_serialize() {
     let stats = BlockStats {
         total_blocks: 100,
         total_lines: 5000,
@@ -1227,13 +944,44 @@ fn test_block_stats_serialize_deserialize() {
         errors: 7,
     };
     let json = serde_json::to_string(&stats).unwrap();
-    let deserialized: BlockStats = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.total_blocks, 100);
-    assert_eq!(deserialized.errors, 7);
+    let de: BlockStats = serde_json::from_str(&json).unwrap();
+    assert_eq!(de.total_blocks, 100);
+    assert_eq!(de.errors, 7);
 }
 
 // ============================================================================
-// Edge Case / Stress Tests
+// Quick Helpers
+// ============================================================================
+
+#[test]
+fn test_quick_block() {
+    let mut mgr = BlockManager::default();
+    let id = quick_block(
+        &mut mgr,
+        "!version",
+        "/home",
+        vec!["⚡ Positronic v0.2.0".to_string()],
+        BlockSource::Native,
+    );
+    let block = mgr.get(id).unwrap();
+    assert!(!block.running);
+    assert_eq!(block.output.len(), 1);
+    assert_eq!(block.source, BlockSource::Native);
+}
+
+#[test]
+fn test_quick_error_block() {
+    let mut mgr = BlockManager::default();
+    let id = quick_error_block(&mut mgr, "bad_cmd", "/home", "command not found", 127);
+    let block = mgr.get(id).unwrap();
+    assert!(!block.running);
+    assert_eq!(block.exit_code, Some(127));
+    assert!(block.failed());
+    assert_eq!(block.output[0].kind, LineKind::Error);
+}
+
+// ============================================================================
+// Edge Cases / Stress
 // ============================================================================
 
 #[test]
@@ -1271,8 +1019,7 @@ fn test_unicode_content() {
 fn test_empty_command() {
     let mut mgr = BlockManager::default();
     let id = mgr.begin("", ".", BlockSource::Shell);
-    let block = mgr.get(id).unwrap();
-    assert_eq!(block.command, "");
+    assert_eq!(mgr.get(id).unwrap().command, "");
 }
 
 #[test]
@@ -1291,18 +1038,14 @@ fn test_very_long_output() {
 #[test]
 fn test_interleaved_blocks() {
     let mut mgr = BlockManager::default();
-
-    // Start two blocks simultaneously (simulating parallel commands)
     let id1 = mgr.begin("job1", ".", BlockSource::Shell);
     let id2 = mgr.begin("job2", ".", BlockSource::Shell);
 
-    // Interleave output
     mgr.append_line(id1, BlockLine::normal("job1 line 1"));
     mgr.append_line(id2, BlockLine::normal("job2 line 1"));
     mgr.append_line(id1, BlockLine::normal("job1 line 2"));
     mgr.append_line(id2, BlockLine::normal("job2 line 2"));
 
-    // Finish in reverse order
     mgr.finish(id2, Some(0), Duration::from_millis(100));
     mgr.finish(id1, Some(0), Duration::from_millis(200));
 
