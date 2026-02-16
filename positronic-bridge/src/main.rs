@@ -1,7 +1,6 @@
-//! Positronic Bridge — the winit/wgpu GPU shell.
+//! Positronic Bridge — GPU frontend shell.
 //!
-//! The binary entry point. All logic lives in the library target.
-//! This replaces the old iced::application() entry point.
+//! Binary entry point. Application logic lives in the library crate.
 
 use positronic_bridge::shell;
 use positronic_bridge::util;

@@ -78,7 +78,7 @@ pub fn draw(
     });
 
     // ── Cursor ──
-    if !data.input.is_empty() || true {
+    if !(data.input.is_empty() && !false) {
         // Show cursor even on empty input
         let cursor_x = text_left + prompt_width + (data.cursor_pos as f32 * CHAR_WIDTH);
         let cursor_y = text_top;

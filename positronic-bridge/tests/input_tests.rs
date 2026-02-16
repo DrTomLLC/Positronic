@@ -306,9 +306,7 @@ fn test_selection_is_empty() {
 fn test_cut_selection() {
     let mut ed = InputEditor::new();
     ed.insert_str("hello world");
-    // Manually create a selection (select "world")
-    // This depends on the selection API; if there's select_word etc.
-    // For now test that cut_selection returns None when nothing selected
+    // cut_selection returns None when nothing selected
     assert!(ed.cut_selection().is_none());
 }
 
@@ -677,7 +675,7 @@ fn test_disable_vim() {
 
 #[test]
 fn test_vim_mode_display() {
-    assert_eq!(format!("{}", VimMode::Disabled), "—");
+    assert_eq!(format!("{}", VimMode::Disabled), "\u{2014}");
     assert_eq!(format!("{}", VimMode::Normal), "NORMAL");
     assert_eq!(format!("{}", VimMode::Insert), "INSERT");
     assert_eq!(format!("{}", VimMode::Command), "COMMAND");

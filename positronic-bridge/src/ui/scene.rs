@@ -1,3 +1,4 @@
+// positronic-bridge/src/ui/scene.rs
 //! Scene compositor.
 //!
 //! Composes the terminal output, status bar, and input bar into
@@ -5,11 +6,8 @@
 
 use std::time::Instant;
 
-use glyphon::TextBounds;
-
-use crate::gfx::{QuadInstance, QuadPipeline, TextEngine};
-use crate::gfx::text::TextRegion;
-use crate::renderer::{self, ColoredSpan, Rgba, ThemeName};
+use crate::gfx::{QuadPipeline, TextEngine};
+use crate::renderer::ThemeName;
 use crate::shell::app::AppState;
 use crate::shell::layout;
 use positronic_core::state_machine::Snapshot;

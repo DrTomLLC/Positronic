@@ -1,3 +1,4 @@
+// positronic-bridge/src/shell/events.rs
 //! Winit event handling.
 //!
 //! Translates WindowEvent into application actions. Replaces the old
@@ -14,7 +15,7 @@
 
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, NamedKey};
 
 use super::app::PositronicApp;
 use crate::ui;
@@ -35,29 +36,32 @@ pub fn handle_window_event(
             tracing::info!("Window destroyed");
         }
 
-        // ── Resize ───────────────────────────────────────────────
-        WindowEvent::Resized(new_size) => {
+        // ── Resize (winit 0.31: Resized → SurfaceResized) ───────
+        WindowEvent::SurfaceResized(new_size) => {
             if let Some(gpu) = &mut app.gpu {
                 gpu.resize(new_size);
             }
 
             // Resize PTY to match
             if new_size.width > 0 && new_size.height > 0 {
-                if let Some(gpu) = &app.gpu {
-                    let (cell_w, cell_h) = (8.0f32, 18.0f32); // approx cell size
-                    let cols = ((new_size.width as f32 - 20.0) / cell_w).max(40.0) as u16;
-                    let rows = ((new_size.height as f32 - 60.0) / cell_h).max(10.0) as u16;
+                let (cell_w, cell_h) = (8.0f32, 18.0f32); // approx cell size
+                let cols = ((new_size.width as f32 - 20.0) / cell_w).max(40.0) as u16;
+                let rows = ((new_size.height as f32 - 60.0) / cell_h).max(10.0) as u16;
 
-                    if let Some(engine) = &app.engine {
-                        let engine = engine.clone();
-                        app.rt.spawn(async move {
-                            let _ = engine.resize(cols, rows).await;
-                        });
-                    }
+                if let Some(engine) = &app.engine {
+                    let engine = engine.clone();
+                    app.rt.spawn(async move {
+                        let _ = engine.resize(cols, rows).await;
+                    });
                 }
             }
 
             app.request_redraw();
+        }
+
+        // ── Modifiers (winit 0.31: track via ModifiersChanged, not KeyEvent.modifiers) ──
+        WindowEvent::ModifiersChanged(modifiers) => {
+            app.modifiers = modifiers.state();
         }
 
         // ── Keyboard ─────────────────────────────────────────────
@@ -66,83 +70,50 @@ pub fn handle_window_event(
                 return;
             }
 
-            // Get current modifiers from the event
-            let mods = event.modifiers.state();
-            let ctrl = mods.contains(ModifiersState::CONTROL);
-            let shift = mods.contains(ModifiersState::SHIFT);
+            // Use the tracked modifiers from ModifiersChanged events
+            let mods = app.modifiers;
+            let ctrl = mods.control_key();
+            let shift = mods.shift_key();
 
-            // ── Ctrl+Shift combos FIRST ──
-            if ctrl && shift {
-                if let Key::Character(ref c) = event.logical_key {
-                    if c.as_str() == "c" || c.as_str() == "C" {
-                        app.handle_copy();
-                        app.request_redraw();
-                        return;
+            match event.logical_key.as_ref() {
+                // Ctrl+C: interrupt or copy
+                Key::Character("c") if ctrl && shift => {
+                    // Ctrl+Shift+C = copy
+                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                        let text = app.input.clone();
+                        let _ = clipboard.set_text(text);
                     }
                 }
-            }
-
-            // ── Ctrl combos (without Shift) ──
-            if ctrl && !shift {
-                match &event.logical_key {
-                    Key::Character(c) if c.as_str() == "c" => {
-                        app.send_interrupt();
-                        app.request_redraw();
-                        return;
-                    }
-                    Key::Character(c) if c.as_str() == "d" => {
-                        app.send_eof();
-                        app.request_redraw();
-                        return;
-                    }
-                    Key::Character(c) if c.as_str() == "l" => {
-                        app.direct_output.clear();
-                        app.last_snapshot = None;
-                        if let Some(engine) = &app.engine {
-                            let engine = engine.clone();
-                            app.rt.spawn(async move {
-                                let _ = engine.send_interrupt().await;
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                let _ = engine.send_raw("\r\n").await;
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                if cfg!(windows) {
-                                    let _ = engine.send_input("cls").await;
-                                } else {
-                                    let _ = engine.send_input("clear").await;
-                                }
-                            });
-                        }
-                        app.request_redraw();
-                        return;
-                    }
-                    _ => {}
+                Key::Character("c") if ctrl => {
+                    app.send_interrupt();
                 }
-            }
 
-            // ── Named keys ──
-            match &event.logical_key {
+                // Ctrl+D: EOF
+                Key::Character("d") if ctrl => {
+                    app.send_eof();
+                }
+
+                // Ctrl+L: clear screen
+                Key::Character("l") if ctrl => {
+                    app.direct_output.clear();
+                    app.last_snapshot = None;
+                    app.request_redraw();
+                }
+
+                // Escape
                 Key::Named(NamedKey::Escape) => {
                     app.send_escape();
-                    app.request_redraw();
                 }
-                Key::Named(NamedKey::ArrowUp) => {
-                    app.history_up();
-                    app.request_redraw();
-                }
-                Key::Named(NamedKey::ArrowDown) => {
-                    app.history_down();
-                    app.request_redraw();
-                }
-                Key::Named(NamedKey::Tab) => {
-                    app.tab_complete();
-                    app.request_redraw();
-                }
+
+                // Enter: submit command
                 Key::Named(NamedKey::Enter) => {
-                    app.submit_input();
+                    app.submit_command();
                     app.request_redraw();
                 }
+
+                // Backspace
                 Key::Named(NamedKey::Backspace) => {
-                    if app.cursor_pos > 0 && !app.input.is_empty() {
+                    if app.cursor_pos > 0 {
                         let byte_pos = app
                             .input
                             .char_indices()
@@ -155,13 +126,14 @@ pub fn handle_window_event(
                             .nth(app.cursor_pos)
                             .map(|(i, _)| i)
                             .unwrap_or(app.input.len());
-                        app.input = format!("{}{}", &app.input[..byte_pos], &app.input[next_byte..]);
+                        app.input.replace_range(byte_pos..next_byte, "");
                         app.cursor_pos -= 1;
                         app.tab_state = None;
-                        app.history_cursor = None;
                         app.request_redraw();
                     }
                 }
+
+                // Delete
                 Key::Named(NamedKey::Delete) => {
                     let char_count = app.input.chars().count();
                     if app.cursor_pos < char_count {
@@ -177,11 +149,13 @@ pub fn handle_window_event(
                             .nth(app.cursor_pos + 1)
                             .map(|(i, _)| i)
                             .unwrap_or(app.input.len());
-                        app.input = format!("{}{}", &app.input[..byte_pos], &app.input[next_byte..]);
+                        app.input.replace_range(byte_pos..next_byte, "");
                         app.tab_state = None;
                         app.request_redraw();
                     }
                 }
+
+                // Arrow keys: cursor movement + history
                 Key::Named(NamedKey::ArrowLeft) => {
                     if app.cursor_pos > 0 {
                         app.cursor_pos -= 1;
@@ -189,12 +163,41 @@ pub fn handle_window_event(
                     }
                 }
                 Key::Named(NamedKey::ArrowRight) => {
-                    let char_count = app.input.chars().count();
-                    if app.cursor_pos < char_count {
+                    if app.cursor_pos < app.input.chars().count() {
                         app.cursor_pos += 1;
                         app.request_redraw();
                     }
                 }
+                Key::Named(NamedKey::ArrowUp) => {
+                    if !app.cmd_history.is_empty() {
+                        let new_cursor = match app.history_cursor {
+                            None => app.cmd_history.len() - 1,
+                            Some(c) if c > 0 => c - 1,
+                            Some(c) => c,
+                        };
+                        app.history_cursor = Some(new_cursor);
+                        app.input = app.cmd_history[new_cursor].clone();
+                        app.cursor_pos = app.input.chars().count();
+                        app.request_redraw();
+                    }
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    if let Some(c) = app.history_cursor {
+                        if c + 1 < app.cmd_history.len() {
+                            let new_cursor = c + 1;
+                            app.history_cursor = Some(new_cursor);
+                            app.input = app.cmd_history[new_cursor].clone();
+                            app.cursor_pos = app.input.chars().count();
+                        } else {
+                            app.history_cursor = None;
+                            app.input.clear();
+                            app.cursor_pos = 0;
+                        }
+                        app.request_redraw();
+                    }
+                }
+
+                // Home / End
                 Key::Named(NamedKey::Home) => {
                     app.cursor_pos = 0;
                     app.request_redraw();
@@ -203,11 +206,17 @@ pub fn handle_window_event(
                     app.cursor_pos = app.input.chars().count();
                     app.request_redraw();
                 }
-                // ── Character input ──
+
+                // Tab: completion
+                Key::Named(NamedKey::Tab) => {
+                    // TODO: integrate with completer
+                    app.request_redraw();
+                }
+
+                // Regular character input
                 Key::Character(c) if !ctrl => {
-                    let char_count = app.input.chars().count();
-                    if app.cursor_pos >= char_count {
-                        app.input.push_str(c.as_str());
+                    if app.cursor_pos == app.input.chars().count() {
+                        app.input.push_str(c);
                     } else {
                         let byte_pos = app
                             .input
@@ -215,7 +224,7 @@ pub fn handle_window_event(
                             .nth(app.cursor_pos)
                             .map(|(i, _)| i)
                             .unwrap_or(app.input.len());
-                        app.input.insert_str(byte_pos, c.as_str());
+                        app.input.insert_str(byte_pos, c);
                     }
                     app.cursor_pos += c.chars().count();
                     app.tab_state = None;
@@ -251,7 +260,7 @@ pub fn handle_window_event(
                 let cwd = app.cwd.clone();
                 let theme_name = app.theme_name;
 
-                let result = gpu.render_frame(clear, |quads, text, device, queue, viewport| {
+                let result = gpu.render_frame(clear, |quads, text, _device, _queue, viewport| {
                     ui::scene::compose(
                         quads,
                         text,

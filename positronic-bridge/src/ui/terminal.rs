@@ -1,3 +1,4 @@
+// positronic-bridge/src/ui/terminal.rs
 //! Terminal output rendering component.
 //!
 //! Renders the PTY snapshot or direct output text into the terminal area.
@@ -12,7 +13,7 @@ use crate::shell::layout::{self, Layout};
 use super::scene::SceneData;
 
 pub fn draw(
-    quads: &mut QuadPipeline,
+    _quads: &mut QuadPipeline,
     text: &mut TextEngine,
     lay: &Layout,
     data: &SceneData<'_>,

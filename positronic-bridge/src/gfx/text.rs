@@ -1,3 +1,4 @@
+// positronic-bridge/src/gfx/text.rs
 //! Glyphon-based text rendering engine.
 //!
 //! Manages the font system, text buffer layout, and GPU rendering.
@@ -5,8 +6,9 @@
 //! then render() uploads glyphs and draws them.
 
 use glyphon::{
-    Attrs, Buffer as GlyphonBuffer, Cache, Color as GColor, Family, FontSystem, Metrics,
+    Attrs, Buffer as GlyphonBuffer, Cache, Family, FontSystem, Metrics,
     Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
+    Viewport,
 };
 use wgpu::{CommandEncoder, Device, MultisampleState, Queue, TextureFormat, TextureView};
 
@@ -31,6 +33,7 @@ pub struct TextEngine {
     font_system: FontSystem,
     swash_cache: SwashCache,
     atlas: TextAtlas,
+    viewport: Viewport,
     renderer: TextRenderer,
     regions: Vec<TextRegion>,
 }
@@ -41,12 +44,14 @@ impl TextEngine {
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
+        let viewport = Viewport::new(device, &cache);
         let renderer = TextRenderer::new(&mut atlas, device, MultisampleState::default(), None);
 
         Self {
             font_system,
             swash_cache,
             atlas,
+            viewport,
             renderer,
             regions: Vec::new(),
         }
@@ -65,9 +70,16 @@ impl TextEngine {
     /// Get the monospace cell size (width, height) at current font size.
     pub fn cell_size(&mut self) -> (f32, f32) {
         // Create a temp buffer to measure 'M'
-        let mut buffer = GlyphonBuffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let mut buffer =
+            GlyphonBuffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         buffer.set_size(&mut self.font_system, Some(1000.0), Some(LINE_HEIGHT));
-        buffer.set_text(&mut self.font_system, "M", &Attrs::new().family(Family::Monospace), Shaping::Advanced, None);
+        buffer.set_text(
+            &mut self.font_system,
+            "M",
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+            None,
+        );
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         // Measure the glyph advance
@@ -100,34 +112,41 @@ impl TextEngine {
             height: viewport[1],
         };
 
+        // Update the glyphon viewport with the current resolution
+        self.viewport.update(queue, resolution);
+
         // Build glyphon buffers for each region
         let mut text_areas: Vec<TextArea<'_>> = Vec::new();
         let mut buffers: Vec<GlyphonBuffer> = Vec::new();
 
         for region in &self.regions {
-            let mut buffer =
-                GlyphonBuffer::new(&mut self.font_system, Metrics::new(FONT_SIZE * region.scale, LINE_HEIGHT * region.scale));
+            let mut buffer = GlyphonBuffer::new(
+                &mut self.font_system,
+                Metrics::new(FONT_SIZE * region.scale, LINE_HEIGHT * region.scale),
+            );
 
             let bounds_w = (region.bounds.right - region.bounds.left) as f32;
             let bounds_h = (region.bounds.bottom - region.bounds.top) as f32;
             buffer.set_size(&mut self.font_system, Some(bounds_w), Some(bounds_h));
 
             // Build the full text with default attrs, then we'll set rich text
-            let full_text: String = region.spans.iter().map(|s| s.text.as_str()).collect();
-
-            // For now, set as single text with default color. Rich text (per-span color)
-            // requires building attrs spans. We'll do a simple version first.
             let default_color = region.default_color.to_glyphon();
             let attrs = Attrs::new().family(Family::Monospace).color(default_color);
 
             // Build rich text spans for per-span coloring
             let mut attrs_spans: Vec<(&str, Attrs<'_>)> = Vec::new();
             for span in &region.spans {
-                let span_attrs = attrs.color(span.color.to_glyphon());
+                let span_attrs = attrs.clone().color(span.color.to_glyphon());
                 attrs_spans.push((&span.text, span_attrs));
             }
 
-            buffer.set_rich_text(&mut self.font_system, attrs_spans, attrs, Shaping::Advanced, None);
+            buffer.set_rich_text(
+                &mut self.font_system,
+                attrs_spans,
+                &attrs,
+                Shaping::Advanced,
+                None,
+            );
             buffer.shape_until_scroll(&mut self.font_system, false);
 
             buffers.push(buffer);
@@ -152,9 +171,9 @@ impl TextEngine {
             queue,
             &mut self.font_system,
             &mut self.atlas,
-            /* &Viewport */,
+            &self.viewport,
+            text_areas,
             &mut self.swash_cache,
-            /* &mut SwashCache */
         ) {
             tracing::warn!("Text prepare failed: {:?}", e);
         }
@@ -177,7 +196,7 @@ impl TextEngine {
                 multiview_mask: None,
             });
 
-            if let Err(e) = self.renderer.render(&self.atlas, &mut pass) {
+            if let Err(e) = self.renderer.render(&self.atlas, &self.viewport, &mut pass) {
                 tracing::warn!("Text render failed: {:?}", e);
             }
         }

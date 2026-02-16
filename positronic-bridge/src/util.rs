@@ -5,13 +5,13 @@ pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,wgpu=warn,naga=warn"));
 
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
         .with_thread_ids(true)
         .with_line_number(true)
         .compact()
-        .init();
+        .try_init();
 }
 
 pub fn install_panic_hook() {

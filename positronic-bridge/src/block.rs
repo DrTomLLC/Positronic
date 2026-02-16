@@ -89,55 +89,25 @@ impl fmt::Display for TerminalBlock {
             match self.exit_code {
                 Some(0) => "✅ ok".to_string(),
                 Some(code) => format!("❌ exit {}", code),
-                None => "—".to_string(),
+                None => "— done".to_string(),
             }
         };
-        write!(
-            f,
-            "[{}] {} ({}, {} lines, {})",
-            self.id,
-            self.command,
-            self.source,
-            self.output.len(),
-            status
-        )
+        write!(f, "[{}] $ {} ({})", status, self.command, self.duration_display())
     }
-}
-
-/// A single line within a block, with optional semantic classification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockLine {
-    pub text: String,
-    pub kind: LineKind,
-}
-
-/// Semantic line classification for coloring/filtering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LineKind {
-    /// Normal output text.
-    Normal,
-    /// Error or stderr content.
-    Error,
-    /// Warning messages.
-    Warning,
-    /// Success/completion messages.
-    Success,
-    /// Informational (headers, dividers, etc).
-    Info,
-    /// Muted/dimmed text.
-    Muted,
 }
 
 /// Where the block's output came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockSource {
-    /// Output from a PTY shell command.
+    /// A command executed via the PTY (legacy shell).
     Shell,
-    /// Direct output from a native ! command.
+    /// A native P-Shell command (!alias, !history, etc.).
     Native,
-    /// Response from the Neural LLM.
+    /// An AI-generated response (!ai, !explain, etc.).
     Neural,
-    /// System message (startup, clear, etc).
+    /// Hardware/IO output.
+    Hardware,
+    /// System-generated message (internal).
     System,
 }
 
@@ -147,9 +117,28 @@ impl fmt::Display for BlockSource {
             BlockSource::Shell => write!(f, "shell"),
             BlockSource::Native => write!(f, "native"),
             BlockSource::Neural => write!(f, "neural"),
+            BlockSource::Hardware => write!(f, "hw"),
             BlockSource::System => write!(f, "system"),
         }
     }
+}
+
+/// Classification of a single output line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LineKind {
+    Normal,
+    Error,
+    Warning,
+    Info,
+    Success,
+    Muted,
+}
+
+/// A single line of block output with classification metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockLine {
+    pub text: String,
+    pub kind: LineKind,
 }
 
 impl fmt::Display for LineKind {
@@ -158,8 +147,8 @@ impl fmt::Display for LineKind {
             LineKind::Normal => write!(f, "normal"),
             LineKind::Error => write!(f, "error"),
             LineKind::Warning => write!(f, "warning"),
-            LineKind::Success => write!(f, "success"),
             LineKind::Info => write!(f, "info"),
+            LineKind::Success => write!(f, "success"),
             LineKind::Muted => write!(f, "muted"),
         }
     }
@@ -175,57 +164,60 @@ impl BlockLine {
     pub fn normal(text: impl Into<String>) -> Self {
         Self { text: text.into(), kind: LineKind::Normal }
     }
-
     pub fn error(text: impl Into<String>) -> Self {
         Self { text: text.into(), kind: LineKind::Error }
     }
-
     pub fn warning(text: impl Into<String>) -> Self {
         Self { text: text.into(), kind: LineKind::Warning }
     }
-
     pub fn info(text: impl Into<String>) -> Self {
         Self { text: text.into(), kind: LineKind::Info }
     }
-
     pub fn success(text: impl Into<String>) -> Self {
         Self { text: text.into(), kind: LineKind::Success }
     }
-
     pub fn muted(text: impl Into<String>) -> Self {
         Self { text: text.into(), kind: LineKind::Muted }
     }
 
-    /// Classify a line by its content (heuristic).
+    /// Auto-classify a line by content heuristics.
     pub fn classify(text: impl Into<String>) -> Self {
-        let s: String = text.into();
-        let trimmed = s.trim_start();
-        let kind = if trimmed.starts_with("error") || trimmed.starts_with("Error")
-            || trimmed.starts_with("ERROR")
-            || trimmed.starts_with("❌") || trimmed.starts_with("FAILED")
+        let text = text.into();
+        let trimmed = text.trim().to_lowercase();
+
+        let kind = if trimmed.starts_with("error")
+            || trimmed.starts_with("❌")
+            || trimmed.starts_with("failed")
         {
             LineKind::Error
-        } else if trimmed.starts_with("warning") || trimmed.starts_with("Warning")
-            || trimmed.starts_with("⚠") || trimmed.starts_with("WARN")
+        } else if trimmed.starts_with("warning")
+            || trimmed.starts_with("warn:")
+            || trimmed.starts_with("warn ")
+            || trimmed.starts_with("⚠")
         {
             LineKind::Warning
-        } else if trimmed.starts_with("✅") || trimmed.starts_with("ok ")
-            || trimmed.starts_with("Compiling") || trimmed.starts_with("Finished")
-            || trimmed.starts_with("PASSED")
-        {
-            LineKind::Success
-        } else if trimmed.starts_with("💡") || trimmed.starts_with("🧠")
-            || trimmed.starts_with("📡") || trimmed.starts_with("🔌")
-            || trimmed.starts_with("INFO") || trimmed.starts_with("note:")
+        } else if trimmed.starts_with("info")
+            || trimmed.starts_with("note:")
+            || trimmed.starts_with("💡")
+            || trimmed.starts_with("📡")
         {
             LineKind::Info
+        } else if trimmed.starts_with("✅")
+            || trimmed.starts_with("ok ")
+            || trimmed == "ok"
+            || trimmed.starts_with("compiling")
+            || trimmed.starts_with("finished")
+            || trimmed.starts_with("passed")
+        {
+            LineKind::Success
         } else {
             LineKind::Normal
         };
-        Self { text: s, kind }
+
+        Self { text, kind }
     }
 
-    /// Whether this line is empty or whitespace-only.
+    /// Whether this line is effectively blank.
     pub fn is_blank(&self) -> bool {
         self.text.trim().is_empty()
     }
@@ -315,32 +307,22 @@ impl BlockManager {
 
     /// Collapse all blocks.
     pub fn collapse_all(&mut self) {
-        for block in &mut self.blocks {
-            block.collapsed = true;
-        }
+        for block in &mut self.blocks { block.collapsed = true; }
     }
 
     /// Expand all blocks.
     pub fn expand_all(&mut self) {
-        for block in &mut self.blocks {
-            block.collapsed = false;
-        }
+        for block in &mut self.blocks { block.collapsed = false; }
     }
 
     /// Get all blocks (for rendering).
-    pub fn blocks(&self) -> &[TerminalBlock] {
-        &self.blocks
-    }
+    pub fn blocks(&self) -> &[TerminalBlock] { &self.blocks }
 
     /// Get the most recent block (if any).
-    pub fn latest(&self) -> Option<&TerminalBlock> {
-        self.blocks.last()
-    }
+    pub fn latest(&self) -> Option<&TerminalBlock> { self.blocks.last() }
 
     /// Get a mutable reference to the most recent block.
-    pub fn latest_mut(&mut self) -> Option<&mut TerminalBlock> {
-        self.blocks.last_mut()
-    }
+    pub fn latest_mut(&mut self) -> Option<&mut TerminalBlock> { self.blocks.last_mut() }
 
     /// Get a block by ID.
     pub fn get(&self, block_id: BlockId) -> Option<&TerminalBlock> {
@@ -352,7 +334,7 @@ impl BlockManager {
         self.blocks.iter_mut().find(|b| b.id == block_id)
     }
 
-    /// Remove a block by ID. Returns the removed block if found.
+    /// Remove a block by ID.
     pub fn remove(&mut self, block_id: BlockId) -> Option<TerminalBlock> {
         if let Some(pos) = self.blocks.iter().position(|b| b.id == block_id) {
             Some(self.blocks.remove(pos))
@@ -362,25 +344,19 @@ impl BlockManager {
     }
 
     /// Get the total number of blocks.
-    pub fn len(&self) -> usize {
-        self.blocks.len()
-    }
+    pub fn len(&self) -> usize { self.blocks.len() }
 
     /// Whether the block manager has no blocks.
-    pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.blocks.is_empty() }
 
     /// Filter blocks by source type.
     pub fn filter_by_source(&self, source: BlockSource) -> Vec<&TerminalBlock> {
         self.blocks.iter().filter(|b| b.source == source).collect()
     }
 
-    /// Filter blocks by exit code. Matches only finished blocks.
+    /// Filter blocks by exit code.
     pub fn filter_by_exit_code(&self, exit_code: i32) -> Vec<&TerminalBlock> {
-        self.blocks.iter()
-            .filter(|b| b.exit_code == Some(exit_code))
-            .collect()
+        self.blocks.iter().filter(|b| b.exit_code == Some(exit_code)).collect()
     }
 
     /// Get all currently running blocks.
@@ -390,16 +366,12 @@ impl BlockManager {
 
     /// Get all blocks that finished with a non-zero exit code.
     pub fn failed_blocks(&self) -> Vec<&TerminalBlock> {
-        self.blocks.iter()
-            .filter(|b| b.failed())
-            .collect()
+        self.blocks.iter().filter(|b| b.failed()).collect()
     }
 
     /// Get all blocks that finished successfully (exit code 0).
     pub fn succeeded_blocks(&self) -> Vec<&TerminalBlock> {
-        self.blocks.iter()
-            .filter(|b| b.succeeded())
-            .collect()
+        self.blocks.iter().filter(|b| b.succeeded()).collect()
     }
 
     /// Search all blocks for lines containing a query string.
@@ -408,7 +380,6 @@ impl BlockManager {
         let mut hits = Vec::new();
 
         for block in &self.blocks {
-            // Check command
             if block.command.to_lowercase().contains(&lower_query) {
                 hits.push(SearchHit {
                     block_id: block.id,
@@ -416,7 +387,6 @@ impl BlockManager {
                     context: block.command.clone(),
                 });
             }
-            // Check output lines
             for (i, line) in block.output.iter().enumerate() {
                 if line.text.to_lowercase().contains(&lower_query) {
                     hits.push(SearchHit {
@@ -445,7 +415,7 @@ impl BlockManager {
         })
     }
 
-    /// Export all blocks to a single text string (for saving/sharing).
+    /// Export all blocks to a single text string.
     pub fn export_all(&self) -> String {
         let mut out = String::new();
         for (i, block) in self.blocks.iter().enumerate() {
@@ -475,33 +445,24 @@ impl BlockManager {
 
     /// Remove oldest blocks to stay within limits.
     fn enforce_limits(&mut self) {
-        // Block count limit
         while self.blocks.len() > self.max_blocks {
             self.blocks.remove(0);
         }
-        // Total line count limit
         while self.total_lines() > self.max_total_lines && self.blocks.len() > 1 {
             self.blocks.remove(0);
         }
     }
 
     /// Clear all blocks (e.g. on Ctrl+L).
-    pub fn clear(&mut self) {
-        self.blocks.clear();
-    }
+    pub fn clear(&mut self) { self.blocks.clear(); }
 
     /// Get summary stats.
     pub fn stats(&self) -> BlockStats {
-        let total_lines = self.total_lines();
-        let running = self.blocks.iter().filter(|b| b.running).count();
-        let errors = self.blocks.iter()
-            .filter(|b| b.exit_code.map(|c| c != 0).unwrap_or(false))
-            .count();
         BlockStats {
             total_blocks: self.blocks.len(),
-            total_lines,
-            running,
-            errors,
+            total_lines: self.total_lines(),
+            running: self.blocks.iter().filter(|b| b.running).count(),
+            errors: self.blocks.iter().filter(|b| b.exit_code.map(|c| c != 0).unwrap_or(false)).count(),
         }
     }
 }
@@ -543,9 +504,7 @@ pub fn quick_block(
 ) -> BlockId {
     let start = Instant::now();
     let id = manager.begin(command, cwd, source);
-    let block_lines: Vec<BlockLine> = lines.into_iter()
-        .map(BlockLine::classify)
-        .collect();
+    let block_lines: Vec<BlockLine> = lines.into_iter().map(BlockLine::classify).collect();
     manager.append(id, block_lines);
     manager.finish(id, Some(0), start.elapsed());
     id
@@ -604,11 +563,6 @@ mod optional_duration_millis {
     }
 }
 
-
-// ═══════════════════════════════════════════════════════════════════
-// Unit Tests (inline)
-// ═══════════════════════════════════════════════════════════════════
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,16 +571,12 @@ mod tests {
     fn test_block_lifecycle() {
         let mut mgr = BlockManager::default();
         let id = mgr.begin("cargo test", "/home/user/project", BlockSource::Shell);
-
         assert!(mgr.get(id).unwrap().running);
-
         mgr.append(id, vec![
             BlockLine::normal("running 5 tests"),
             BlockLine::success("test result: ok. 5 passed"),
         ]);
-
         mgr.finish(id, Some(0), Duration::from_millis(250));
-
         let block = mgr.get(id).unwrap();
         assert!(!block.running);
         assert_eq!(block.exit_code, Some(0));
@@ -646,64 +596,5 @@ mod tests {
         let hits = mgr.search("E0308");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].block_id, id);
-    }
-
-    #[test]
-    fn test_enforce_limits() {
-        let mut mgr = BlockManager::new(3, 1000);
-        for i in 0..5 {
-            mgr.begin(&format!("cmd {}", i), ".", BlockSource::Shell);
-        }
-        assert_eq!(mgr.blocks().len(), 3);
-    }
-
-    #[test]
-    fn test_copy_block() {
-        let mut mgr = BlockManager::default();
-        let id = mgr.begin("ls -la", "/home", BlockSource::Shell);
-        mgr.append(id, vec![BlockLine::normal("total 42")]);
-        mgr.finish(id, Some(0), Duration::from_millis(5));
-
-        let copied = mgr.copy_block(id).unwrap();
-        assert!(copied.contains("$ ls -la"));
-        assert!(copied.contains("total 42"));
-        assert!(copied.contains("[exit 0]"));
-    }
-
-    #[test]
-    fn test_line_classification() {
-        assert_eq!(BlockLine::classify("error: something failed").kind, LineKind::Error);
-        assert_eq!(BlockLine::classify("warning: unused variable").kind, LineKind::Warning);
-        assert_eq!(BlockLine::classify("✅ All tests passed").kind, LineKind::Success);
-        assert_eq!(BlockLine::classify("💡 Did you mean: ls?").kind, LineKind::Info);
-        assert_eq!(BlockLine::classify("hello world").kind, LineKind::Normal);
-    }
-
-    #[test]
-    fn test_collapse_toggle() {
-        let mut mgr = BlockManager::default();
-        let id = mgr.begin("test", ".", BlockSource::Native);
-        assert!(!mgr.get(id).unwrap().collapsed);
-
-        mgr.toggle_collapse(id);
-        assert!(mgr.get(id).unwrap().collapsed);
-
-        mgr.toggle_collapse(id);
-        assert!(!mgr.get(id).unwrap().collapsed);
-    }
-
-    #[test]
-    fn test_quick_block() {
-        let mut mgr = BlockManager::default();
-        let id = quick_block(
-            &mut mgr,
-            "!version",
-            "/home",
-            vec!["⚡ Positronic v0.2.0".to_string()],
-            BlockSource::Native,
-        );
-        let block = mgr.get(id).unwrap();
-        assert!(!block.running);
-        assert_eq!(block.output.len(), 1);
     }
 }

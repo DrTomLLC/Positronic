@@ -1,8 +1,8 @@
-//! # Hardware Status Display
-//!
-//! Bridge-side hardware status tracking and display data.
-//! Receives events from positronic-io and maintains UI-friendly state
-//! for rendering device lists, connection status, and sensor data summaries.
+// positronic-bridge/src/hardware/mod.rs
+//
+// Hardware Status Display — Bridge-side hardware status tracking and display data.
+// Receives events from positronic-io and maintains UI-friendly state
+// for rendering device lists, connection status, and sensor data summaries.
 
 use std::collections::HashMap;
 

@@ -1,9 +1,11 @@
-//! Terminal mode detection.
-//!
-//! Scans the PTY snapshot to determine whether the terminal is in a
-//! pager (`-- More --`), continuation prompt (`>>`), normal prompt,
-//! or running state. Used to display mode indicators in the status bar
-//! and to inform the UI about when control signals are needed.
+// positronic-bridge/src/detection.rs
+//
+// Terminal mode detection.
+//
+// Scans the PTY snapshot to determine whether the terminal is in a
+// pager (`-- More --`), continuation prompt (`>>`), normal prompt,
+// or running state. Used to display mode indicators in the status bar
+// and to inform the UI about when control signals are needed.
 
 use positronic_core::state_machine::Snapshot;
 

@@ -1,3 +1,4 @@
+// positronic-bridge/src/gfx/renderer.rs
 //! wgpu device/surface lifecycle and per-frame orchestration.
 //!
 //! GpuState owns the device, queue, surface, and config. It creates the
@@ -33,7 +34,7 @@ pub struct GpuState {
 impl GpuState {
     /// Initialize wgpu with the given window. Blocks until the adapter is ready.
     pub fn new(window: Arc<dyn Window>) -> anyhow::Result<Self> {
-        let size = window.outer_size();
+        let size = window.surface_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
 
@@ -44,12 +45,12 @@ impl GpuState {
 
         let surface = instance.create_surface(window.clone())?;
 
+        // wgpu 28: request_adapter returns Result, not Option
         let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
             power_preference: PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
-        }))
-            .or_else(|_| anyhow::anyhow!("No suitable GPU adapter found"))?;
+        }))?;
 
         tracing::info!(
             "GPU adapter: {} ({:?})",
@@ -84,6 +85,7 @@ impl GpuState {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+
         surface.configure(&device, &config);
 
         let quads = QuadPipeline::new(&device, format);
@@ -101,26 +103,27 @@ impl GpuState {
         })
     }
 
-    /// Handle window resize.
+    /// Resize the surface when the window size changes.
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
+
         self.size = new_size;
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Render a frame. Returns Ok(true) if a frame was presented, Ok(false) if skipped.
+    /// Render a single frame. The `draw_fn` closure populates quad + text data.
     pub fn render_frame(
         &mut self,
         clear_color: Rgba,
         draw_fn: impl FnOnce(&mut QuadPipeline, &mut TextEngine, &Device, &Queue, [u32; 2]),
     ) -> anyhow::Result<bool> {
         let output = match self.surface.get_current_texture() {
-            Ok(tex) => tex,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            Ok(output) => output,
+            Err(wgpu::SurfaceError::Lost) => {
                 self.surface.configure(&self.device, &self.config);
                 return Ok(false);
             }

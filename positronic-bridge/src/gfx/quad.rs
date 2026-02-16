@@ -1,12 +1,11 @@
+// positronic-bridge/src/gfx/quad.rs
 //! Colored rectangle pipeline.
 //!
 //! Draws filled quads (backgrounds, cursor, selection, status bar, etc.)
 //! using the shapes.wgsl vertex/fragment shader. Each quad is two triangles
 //! with per-vertex color.
 
-use wgpu::{
-    Buffer, BufferUsages, Device, Queue, RenderPass, RenderPipeline, TextureFormat,
-};
+use wgpu::{Buffer, BufferUsages, Device, Queue, RenderPass, RenderPipeline, TextureFormat};
 
 use crate::renderer::Rgba;
 
@@ -22,10 +21,8 @@ struct QuadVertex {
 }
 
 impl QuadVertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
-        0 => Float32x2,
-        1 => Float32x4,
-    ];
+    const ATTRIBS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -86,19 +83,20 @@ impl QuadPipeline {
             mapped_at_creation: false,
         });
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("quad-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("quad-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
 
         let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quad-bg"),
@@ -109,13 +107,14 @@ impl QuadPipeline {
             }],
         });
 
+        // wgpu 28: push_constant_ranges removed, use immediate_size instead
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("quad-pl"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
             immediate_size: 0,
         });
 
+        // wgpu 28: multiview removed, use multiview_mask instead
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("quad-pipeline"),
             layout: Some(&pipeline_layout),
@@ -141,7 +140,6 @@ impl QuadPipeline {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
             cache: None,
             multiview_mask: None,
         });
@@ -163,13 +161,19 @@ impl QuadPipeline {
         let y1 = quad.y + quad.h;
 
         // Two triangles per quad
-        self.vertices.push(QuadVertex { pos: [x0, y0], color: c });
-        self.vertices.push(QuadVertex { pos: [x1, y0], color: c });
-        self.vertices.push(QuadVertex { pos: [x0, y1], color: c });
+        self.vertices
+            .push(QuadVertex { pos: [x0, y0], color: c });
+        self.vertices
+            .push(QuadVertex { pos: [x1, y0], color: c });
+        self.vertices
+            .push(QuadVertex { pos: [x0, y1], color: c });
 
-        self.vertices.push(QuadVertex { pos: [x1, y0], color: c });
-        self.vertices.push(QuadVertex { pos: [x1, y1], color: c });
-        self.vertices.push(QuadVertex { pos: [x0, y1], color: c });
+        self.vertices
+            .push(QuadVertex { pos: [x1, y0], color: c });
+        self.vertices
+            .push(QuadVertex { pos: [x1, y1], color: c });
+        self.vertices
+            .push(QuadVertex { pos: [x0, y1], color: c });
     }
 
     /// Clear all queued quads for the next frame.

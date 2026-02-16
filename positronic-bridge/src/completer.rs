@@ -1,11 +1,13 @@
-//! Tab Completion Engine
-//!
-//! Provides context-aware completions for:
-//! - ! commands (e.g., !hi → !history, !help, !hive)
-//! - Sub-commands (e.g., !alias s → !alias set)
-//! - Theme names (e.g., !theme c → !theme cyberpunk)
-//! - File/directory paths (e.g., cd Dow → cd Downloads)
-//! - Alias names
+// positronic-bridge/src/completer.rs
+//
+// Tab Completion Engine
+//
+// Provides context-aware completions for:
+// - ! commands (e.g., !hi → !history, !help, !hive)
+// - Sub-commands (e.g., !alias s → !alias set)
+// - Theme names (e.g., !theme c → !theme cyberpunk)
+// - File/directory paths (e.g., cd Dow → cd Downloads)
+// - Alias names
 
 use std::path::Path;
 
@@ -147,7 +149,7 @@ fn complete_bang(input: &str) -> Option<CompletionState> {
         let cmd = parts[0];
         let arg_partial = parts[1].trim();
 
-        // Special case: !theme <name>
+        // Special case: !theme <n>
         if cmd == "theme" {
             let matches: Vec<String> = THEME_NAMES
                 .iter()
@@ -287,14 +289,12 @@ mod tests {
         let state = complete("!hi", &[], ".").unwrap();
         assert!(state.completions.contains(&"!history".to_string()));
         assert!(state.completions.contains(&"!hive".to_string()));
-        // "help" starts with "he", not "hi" — must NOT match
         assert!(!state.completions.contains(&"!help".to_string()));
         assert_eq!(state.completions.len(), 2);
     }
 
     #[test]
     fn test_bang_exact_no_completion() {
-        // Exact match — nothing to complete
         let result = complete("!help", &[], ".");
         assert!(result.is_none());
     }
@@ -320,7 +320,7 @@ mod tests {
     fn test_cycling() {
         let mut state = complete("!hi", &[], ".").unwrap();
         let count = state.len();
-        assert!(count >= 2); // help, history, hive
+        assert!(count >= 2);
         let first = state.current().to_string();
         let next = state.next().to_string();
         assert_ne!(first, next);

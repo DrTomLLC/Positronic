@@ -1,8 +1,8 @@
-//! # BioLink Module
-//!
-//! Voice and Accessibility interfaces for Positronic.
-//! Handles screen reader support, text-to-speech event queuing,
-//! and accessibility state management.
+// positronic-bridge/src/biolink/mod.rs
+//
+// BioLink Module — Voice and Accessibility interfaces for Positronic.
+// Handles screen reader support, text-to-speech event queuing,
+// and accessibility state management.
 
 use std::collections::VecDeque;
 
@@ -61,10 +61,7 @@ impl BioLinkEvent {
                     format!("Command failed with code {}: {}", exit_code, command)
                 }
             }
-            BioLinkEvent::JobFinished {
-                description,
-                success,
-            } => {
+            BioLinkEvent::JobFinished { description, success } => {
                 if *success {
                     format!("Job complete: {}", description)
                 } else {

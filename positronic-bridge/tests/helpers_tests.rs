@@ -40,8 +40,6 @@ fn short_path_no_change() {
 fn short_path_truncates_long() {
     let long_path = "C:\\Users\\Doctor\\Documents\\Projects\\SubFolder\\AnotherFolder\\Deep";
     let result = short_path(long_path);
-    // If home dir doesn't match, should truncate with ellipsis
-    // or show as-is if contains home
     assert!(result.len() <= long_path.len());
 }
 
@@ -86,11 +84,8 @@ fn hash_different_dimensions_different_hash() {
 
 #[test]
 fn buffer_trim_boundary() {
-    // Test the push_direct buffer management logic
-    // The buffer should trim when exceeding MAX_DIRECT_BYTES (256KB)
-    use positronic_bridge::messages::push_direct;
-
-    // We can't easily construct a PositronicApp here without iced,
-    // but we can verify the constant exists
-    assert_eq!(positronic_bridge::app::MAX_DIRECT_BYTES, 256 * 1024);
+    // Verify the constant exists at its new post-migration path.
+    // push_direct is now a method on PositronicApp (not a free function),
+    // so we just verify the constant value here.
+    assert_eq!(positronic_bridge::shell::app::MAX_DIRECT_BYTES, 256 * 1024);
 }

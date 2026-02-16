@@ -1,8 +1,10 @@
-//! Current Working Directory tracking.
-//!
-//! Two strategies:
-//! 1. **Proactive**: Parse `cd`/`pushd`/`Set-Location` commands before sending to PTY.
-//! 2. **Reactive**: Parse the PTY snapshot prompt line for common shell prompt patterns.
+// positronic-bridge/src/cwd.rs
+//
+// Current Working Directory tracking.
+//
+// Two strategies:
+// 1. **Proactive**: Parse `cd`/`pushd`/`Set-Location` commands before sending to PTY.
+// 2. **Reactive**: Parse the PTY snapshot prompt line for common shell prompt patterns.
 
 use positronic_core::state_machine::Snapshot;
 
@@ -69,9 +71,7 @@ pub fn update_cwd_from_snapshot(snapshot: &Snapshot, cwd: &mut String) {
 
         // ── PowerShell: PS C:\path> ──
         if let Some(rest) = trimmed.strip_prefix("PS ") {
-            if let Some(path) = rest.strip_suffix('>').or_else(|| {
-                rest.split('>').next()
-            }) {
+            if let Some(path) = rest.strip_suffix('>').or_else(|| rest.split('>').next()) {
                 let path = path.trim();
                 if !path.is_empty()
                     && (path.contains('\\') || path.contains('/') || path.starts_with('~'))
