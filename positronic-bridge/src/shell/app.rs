@@ -2,6 +2,15 @@
 //!
 //! Replaces the old iced app.rs + update.rs + messages.rs.
 //! All business logic (engine boot, command dispatch, history, etc.) is preserved.
+//!
+//! KEY ARCHITECTURAL NOTES:
+//!   - Engine is booted via `PositronicEngine::start(cols, rows, redraw_tx)`.
+//!     The engine internally spawns the PTY reader pump that feeds bytes
+//!     through the state machine and fires `redraw_tx` on new output.
+//!   - Command results (`ExecuteResult`) are delivered back to the main thread
+//!     via a dedicated `cmd_result_rx` channel, polled alongside PTY redraws.
+//!   - Engine is communicated from the async boot task to the main thread via
+//!     `LazyLock<Mutex<Option>>` statics (single-window app pattern).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,6 +21,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use positronic_core::engine::ExecuteResult;
 use positronic_core::state_machine::Snapshot;
 use positronic_core::PositronicEngine;
 use tokio::sync::mpsc;
@@ -45,6 +55,8 @@ pub struct PositronicApp {
     // ── Engine ──
     pub engine: Option<Arc<PositronicEngine>>,
     pub redraw_rx: Option<mpsc::Receiver<()>>,
+    pub cmd_result_tx: mpsc::Sender<CmdResult>,
+    pub cmd_result_rx: mpsc::Receiver<CmdResult>,
 
     // ── Terminal State ──
     pub state: AppState,
@@ -70,8 +82,20 @@ pub struct PositronicApp {
     pub cwd: String,
     pub theme_name: ThemeName,
 
+    // ── Shutdown flag (set by !exit, checked by event loop) ──
+    pub wants_exit: bool,
+
     // ── Tokio runtime handle (for async engine ops) ──
     pub rt: tokio::runtime::Handle,
+}
+
+/// Result delivered from async command execution back to the main thread.
+#[derive(Debug, Clone)]
+pub enum CmdResult {
+    /// Engine produced an ExecuteResult.
+    Executed(ExecuteResult),
+    /// Engine returned an error.
+    Error(String),
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -110,6 +134,43 @@ impl PositronicApp {
         got_any
     }
 
+    /// Poll for command results (non-blocking).
+    pub(crate) fn poll_cmd_results(&mut self) -> bool {
+        let mut got_any = false;
+        while let Ok(result) = self.cmd_result_rx.try_recv() {
+            got_any = true;
+            match result {
+                CmdResult::Executed(exec_result) => {
+                    self.handle_execute_result(exec_result);
+                }
+                CmdResult::Error(err) => {
+                    self.push_direct(&format!("❌ {}", err));
+                }
+            }
+        }
+        got_any
+    }
+
+    /// Handle an ExecuteResult from the engine.
+    fn handle_execute_result(&mut self, result: ExecuteResult) {
+        match result {
+            ExecuteResult::SentToPty => {
+                // Output comes via PTY snapshots — nothing to do here.
+            }
+            ExecuteResult::DirectOutput(lines) => {
+                self.push_direct(&lines.join("\n"));
+            }
+            ExecuteResult::ClearScreen => {
+                self.direct_output.clear();
+                self.last_snapshot = None;
+            }
+            ExecuteResult::Exit => {
+                self.push_direct("👋 Exiting Positronic...");
+                self.wants_exit = true;
+            }
+        }
+    }
+
     /// Refresh the snapshot from the engine.
     fn update_snapshot(&mut self) {
         if let Some(engine) = &self.engine {
@@ -120,6 +181,7 @@ impl PositronicApp {
                 update_cwd_from_snapshot(&snapshot, &mut self.cwd);
                 self.last_snapshot = Some(snapshot);
 
+                // Clear the boot banner once real PTY output arrives
                 if !self.direct_output.is_empty() && self.direct_output.starts_with("⚡") {
                     self.direct_output.clear();
                 }
@@ -147,6 +209,7 @@ impl PositronicApp {
             return;
         }
 
+        // Record in history
         self.cmd_history.push(trimmed.clone());
         self.history_cursor = None;
         self.tab_state = None;
@@ -154,26 +217,30 @@ impl PositronicApp {
         self.input.clear();
         self.cursor_pos = 0;
 
+        // Track cd commands for CWD
         track_cd_command(&trimmed, &mut self.cwd);
 
-        // Local theme handling
+        // ── Local-only commands (handled entirely in the bridge) ──
+
+        // !theme — local UI-only command
         if trimmed.starts_with("!theme") {
             self.handle_theme_command(&trimmed);
             return;
         }
 
-        // Local exit handling
-        if trimmed == "!exit" || trimmed == "!quit" {
-            // Will be handled by the event loop
-            if let Some(window) = &self.window {
-                // Request close — the event loop will handle it
-                // For now just push a message
-                self.push_direct("  👋 Goodbye!");
-            }
+        // !pwd — local shortcut
+        if trimmed == "!pwd" {
+            self.push_direct(&format!("📂 {}", self.cwd));
             return;
         }
 
-        // Local clear
+        // !copy — clipboard
+        if trimmed == "!copy" {
+            self.handle_copy();
+            return;
+        }
+
+        // !clear / clear / cls — local clear + PTY clear
         if trimmed == "!clear" || trimmed == "clear" || trimmed == "cls" {
             self.direct_output.clear();
             self.last_snapshot = None;
@@ -194,22 +261,31 @@ impl PositronicApp {
             return;
         }
 
-        // Local clipboard copy
-        if trimmed == "!copy" {
-            self.handle_copy();
+        // !exit / !quit — set the exit flag (event loop picks it up)
+        if trimmed == "!exit" || trimmed == "!quit" {
+            self.push_direct("👋 Goodbye!");
+            self.wants_exit = true;
             return;
         }
 
-        // Execute via engine
+        // ── Engine commands (routed through Runner pipeline) ──
+        //
+        // The engine's Runner handles: !help, !history, !search, !stats,
+        // !top, !alias, !unalias, !bookmark, !bm, !bookmarks, and all
+        // other ! commands, plus alias expansion and PTY passthrough.
+
         if let Some(engine) = &self.engine {
-            self.push_direct(&format!("➜ {}", trimmed));
             let engine = engine.clone();
             let cmd = trimmed.clone();
+            let tx = self.cmd_result_tx.clone();
+
             self.rt.spawn(async move {
-                match engine.execute(&cmd).await {
-                    Ok(_result) => {}
+                match engine.send_input(&cmd).await {
+                    Ok(result) => {
+                        let _ = tx.send(CmdResult::Executed(result)).await;
+                    }
                     Err(e) => {
-                        tracing::error!("Command failed: {:#}", e);
+                        let _ = tx.send(CmdResult::Error(format!("{:#}", e))).await;
                     }
                 }
             });
@@ -232,6 +308,8 @@ impl PositronicApp {
             }
         } else {
             self.push_direct(&format!("❌ Unknown theme: {}", args[1]));
+            let names: Vec<&str> = ThemeName::all().iter().map(|t| t.label()).collect();
+            self.push_direct(&format!("   Available: {}", names.join(", ")));
         }
     }
 
@@ -246,10 +324,10 @@ impl PositronicApp {
         match arboard::Clipboard::new() {
             Ok(mut clip) => {
                 let _ = clip.set_text(text);
-                self.push_direct("  📋 Copied to clipboard.");
+                self.push_direct("📋 Copied to clipboard.");
             }
             Err(_) => {
-                self.push_direct("  ⚠ Clipboard unavailable.");
+                self.push_direct("⚠ Clipboard unavailable.");
             }
         }
     }
@@ -266,7 +344,7 @@ impl PositronicApp {
         };
         self.history_cursor = Some(idx);
         self.input = self.cmd_history[idx].clone();
-        self.cursor_pos = self.input.len();
+        self.cursor_pos = self.input.chars().count();
         self.tab_state = None;
     }
 
@@ -279,7 +357,7 @@ impl PositronicApp {
             let idx = cursor + 1;
             self.history_cursor = Some(idx);
             self.input = self.cmd_history[idx].clone();
-            self.cursor_pos = self.input.len();
+            self.cursor_pos = self.input.chars().count();
         } else {
             self.history_cursor = None;
             self.input.clear();
@@ -297,7 +375,7 @@ impl PositronicApp {
         if let Some(ref mut state) = self.tab_state {
             let next = state.next().to_string();
             self.input = next;
-            self.cursor_pos = self.input.len();
+            self.cursor_pos = self.input.chars().count();
         } else {
             let aliases = crate::helpers::get_alias_names_from(self.engine.as_deref());
             if let Some(state) = completer::complete(&self.input, &aliases, &self.cwd) {
@@ -305,7 +383,7 @@ impl PositronicApp {
                 let count = state.len();
                 self.tab_state = Some(state);
                 self.input = first;
-                self.cursor_pos = self.input.len();
+                self.cursor_pos = self.input.chars().count();
 
                 if count > 1 {
                     let all: Vec<String> = self
@@ -371,7 +449,7 @@ impl ApplicationHandler for PositronicApp {
 
         let attrs = WindowAttributes::default()
             .with_title("Positronic /// Data Surface")
-            .with_min_surface_size(PhysicalSize::new(1280u32, 800u32));
+            .with_inner_size(PhysicalSize::new(1280u32, 800u32));
 
         match event_loop.create_window(attrs) {
             Ok(window) => {
@@ -409,19 +487,37 @@ impl ApplicationHandler for PositronicApp {
         super::events::handle_window_event(self, event_loop, event);
     }
 
-    fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Poll for PTY redraws
-        if self.poll_redraws() {
+        let pty_changed = self.poll_redraws();
+
+        // Poll for command results (DirectOutput, ClearScreen, Exit, etc.)
+        let cmd_changed = self.poll_cmd_results();
+
+        if pty_changed || cmd_changed {
             self.request_redraw();
         }
+
+        // Honor the exit flag
+        if self.wants_exit {
+            event_loop.exit();
+        }
     }
-fn can_create_surfaces(&mut self, _: &(dyn ActiveEventLoop + 'static)) { todo!() }
 }
 
-impl<T> PositronicApp {
+// ════════════════════════════════════════════════════════════════════
+// Engine Boot
+// ════════════════════════════════════════════════════════════════════
+
+impl PositronicApp {
     /// Boot the Positronic engine in the background.
+    ///
+    /// Creates a PTY redraw channel and passes it to `PositronicEngine::start()`.
+    /// The engine internally spawns the PTY reader pump that feeds bytes through
+    /// the state machine. When new output arrives, the engine fires `redraw_tx`
+    /// which we poll in `about_to_wait()`.
     fn boot_engine(&mut self) {
-        self.push_direct("⚡ Positronic v0.3.0 Online.  Type !help for commands.");
+        self.push_direct("⏳ Booting Positronic Engine...");
 
         let rt = self.rt.clone();
         let (redraw_tx, redraw_rx) = mpsc::channel(64);
@@ -431,54 +527,39 @@ impl<T> PositronicApp {
         let window = self.window.clone();
 
         rt.spawn(async move {
-            match PositronicEngine::boot(120, 30).await {
+            // Pass redraw_tx directly to the engine — it owns the PTY reader pump.
+            // No wait_for_output() loop needed — the engine handles everything internally.
+            match PositronicEngine::start(120, 30, redraw_tx).await {
                 Ok(engine) => {
-                    let engine: std::sync::Arc<T> = Arc::new(engine);
+                    let engine = Arc::new(engine);
 
-                    // Start the PTY reader pump
-                    let eng2 = engine.clone();
-                    let tx = redraw_tx.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            match eng2.wait_for_output().await {
-                                Ok(true) => {
-                                    let _ = tx.send(()).await;
-                                }
-                                Ok(false) => break,
-                                Err(_) => break,
-                            }
-                        }
-                    });
+                    // Store engine for main-thread pickup
+                    ENGINE_READY.lock().unwrap().replace(engine);
 
-                    // We need to communicate the engine back to the main thread.
-                    // For now, we'll use a simple approach — store it via a static channel.
-                    // (In production, use a proper cross-thread channel.)
+                    // Wake the event loop to pick up the engine
                     if let Some(w) = window {
-                        // Store engine for pickup
-                        ENGINE_READY
-                            .lock()
-                            .unwrap()
-                            .replace(engine);
                         w.request_redraw();
                     }
                 }
                 Err(e) => {
                     tracing::error!("Engine boot failed: {:#}", e);
-                    ENGINE_ERROR
-                        .lock()
-                        .unwrap()
-                        .replace(format!("{:#}", e));
+                    ENGINE_ERROR.lock().unwrap().replace(format!("{:#}", e));
+
+                    if let Some(w) = window {
+                        w.request_redraw();
+                    }
                 }
             }
         });
     }
 
-    /// Check if the engine is ready (called from the event loop).
+    /// Check if the engine is ready (called from the event loop on RedrawRequested).
     pub fn check_engine_ready(&mut self) {
         if self.engine.is_some() {
             return;
         }
 
+        // Check for successful boot
         if let Some(engine) = ENGINE_READY.lock().unwrap().take() {
             // Hydrate history from vault
             match engine.runner.vault().recent_unique(100) {
@@ -503,6 +584,7 @@ impl<T> PositronicApp {
             self.push_direct("⚡ Positronic v0.3.0 Online.  Type !help for commands.");
         }
 
+        // Check for boot failure
         if let Some(err) = ENGINE_ERROR.lock().unwrap().take() {
             self.state = AppState::Error(err.clone());
             self.push_direct(&format!("❌ BOOT FAILED: {}", err));
@@ -512,7 +594,6 @@ impl<T> PositronicApp {
 
 // Cross-thread engine delivery (simple approach for single-window app)
 use std::sync::Mutex;
-use crossterm::ExecutableCommand;
 
 static ENGINE_READY: std::sync::LazyLock<Mutex<Option<Arc<PositronicEngine>>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
@@ -534,11 +615,16 @@ pub fn run() -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
+    // Command result channel — async tasks send results, main thread polls
+    let (cmd_result_tx, cmd_result_rx) = mpsc::channel(64);
+
     let mut app = PositronicApp {
         window: None,
         gpu: None,
         engine: None,
         redraw_rx: None,
+        cmd_result_tx,
+        cmd_result_rx,
         state: AppState::Booting,
         direct_output: "⏳ Booting Positronic Engine...\n".to_string(),
         last_snapshot: None,
@@ -555,6 +641,7 @@ pub fn run() -> anyhow::Result<()> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string()),
         theme_name: ThemeName::Default,
+        wants_exit: false,
         rt: handle,
     };
 

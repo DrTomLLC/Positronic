@@ -231,8 +231,9 @@ pub fn handle_window_event(
             // Check if engine became ready
             app.check_engine_ready();
 
-            // Poll PTY
+            // Poll PTY + command results
             app.poll_redraws();
+            app.poll_cmd_results();
 
             // Render
             if let Some(gpu) = &mut app.gpu {

@@ -4,8 +4,8 @@
 //! It translates platform events into application actions, manages the
 //! engine lifecycle, and coordinates rendering.
 
-pub(crate) mod app;
-mod events;
-pub(crate) mod layout;
+pub mod app;
+pub(crate) mod events;
+pub mod layout;
 
 pub use app::run;
