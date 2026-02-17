@@ -10,6 +10,12 @@
 // - Chart specifications for inline plotting
 // - Markdown structure detection
 
+pub mod renderer;
+pub mod events;
+pub mod protocol;
+pub mod layout;
+pub(crate) mod detect;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -222,6 +228,7 @@ pub struct ImageMeta {
     pub height: Option<u32>,
     pub data_offset: usize,
     pub data_len: usize,
+    path: ()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

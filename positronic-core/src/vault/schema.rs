@@ -1,3 +1,4 @@
+/// positronic-core/src/vault/schema.rs
 /// The initial schema for the Positronic Vault.
 pub const MIGRATION_INIT: &str = r#"
 CREATE TABLE IF NOT EXISTS session (

@@ -1,3 +1,5 @@
+// positronic-core/src/vault/mod.rs
+
 use chrono::Utc;
 use rusqlite::{Connection, Result, params};
 use std::path::Path;

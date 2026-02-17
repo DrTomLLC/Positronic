@@ -39,5 +39,5 @@ pub mod detection;
 pub mod helpers;
 pub mod renderer;
 pub mod util;
-
-mod platform;
+pub mod platform;
+pub mod widgets;
